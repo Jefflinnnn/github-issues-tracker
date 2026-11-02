@@ -4,6 +4,7 @@ import datetime
 from collections.abc import Callable
 from collections.abc import Sequence
 
+from triage.model import prompt
 from triage.pipeline import load
 from triage.pipeline import run
 from triage.pipeline import transform
@@ -30,16 +31,26 @@ def summary(result: run.RunResult, width: int) -> str:
     hot = sorted(having(transform.Flag.HOT), key=lambda i: -i.engagement)
     stale = sorted(having(transform.Flag.STALE), key=lambda i: -i.idle_days)
 
+    def tag(item: transform.FlaggedIssue) -> str:
+        return result.tags.get(item.issue.id, ("untagged", ""))[0]
+
     lines = [
         f"{result.name_with_owner} · {len(flagged)} open · "
         f"{len(hot)} hot · {len(stale)} stale",
+        _tag_counts([tag(item) for item in flagged]),
         _run_line(result),
+        _model_line(result),
         "",
     ]
     lines += _section(
-        "HOT", hot, lambda i: f"{i.engagement} reacts+comments", width
+        "HOT",
+        hot,
+        lambda i: f"{tag(i):<8} {i.engagement} reacts+comments",
+        width,
     )
-    lines += _section("STALE", stale, lambda i: f"idle {i.idle_days}d", width)
+    lines += _section(
+        "STALE", stale, lambda i: f"{tag(i):<8} idle {i.idle_days}d", width
+    )
     lines.append(f"Open an issue: {result.url}/issues/<number>")
     return "\n".join(lines) + "\n"
 
@@ -72,12 +83,38 @@ def history(repos: Sequence[load.RepoHistory]) -> str:
     )
 
 
+def _tag_counts(tags: Sequence[str]) -> str:
+    """Counts open issues per main tag, in the taxonomy's order."""
+    names = [tag.value for tag in prompt.Tag] + ["untagged"]
+    counts = [(name, tags.count(name)) for name in names]
+    return "Tags: " + " · ".join(
+        f"{name} {count}" for name, count in counts if count
+    )
+
+
+def _model_line(result: run.RunResult) -> str:
+    """Says what the model did this run and what it cost."""
+    outcome = result.outcome
+    parts = [
+        f"{result.model} tagged {outcome.tagged} this run",
+        f"${outcome.spent_usd:.4f} of ${result.budget_usd:.2f} budget",
+    ]
+    if outcome.left_for_budget:
+        parts.append(
+            f"{outcome.left_for_budget} left for the next run (budget reached)"
+        )
+    if outcome.skipped:
+        numbers = ", ".join(f"#{number}" for number in outcome.skipped)
+        parts.append(f"unusable replies for {numbers}")
+    return "Model: " + " · ".join(parts) + "."
+
+
 def _run_line(result: run.RunResult) -> str:
     """Says what this run fetched."""
     if result.previous_run_at is None:
-        return f"First run: fetched {result.fetched} open issues."
+        return f"First run: fetched {_issues(result.fetched, 'open ')}."
     return (
-        f"{result.fetched} issues changed since the last run "
+        f"{_issues(result.fetched)} changed since the last run "
         f"({_local(result.previous_run_at)})."
     )
 
@@ -93,12 +130,18 @@ def _section(
         return []
     lines = [f"{title} ({len(items)})"]
     for item in items[:SECTION_LIMIT]:
-        prefix = f"  #{item.issue.number:<6} {detail(item):<20} "
+        prefix = f"  #{item.issue.number:<6} {detail(item):<29} "
         lines.append(prefix + _cut(item.issue.title, width - len(prefix)))
     if len(items) > SECTION_LIMIT:
         lines.append(f"  … and {len(items) - SECTION_LIMIT} more")
     lines.append("")
     return lines
+
+
+def _issues(count: int, kind: str = "") -> str:
+    """Returns e.g. "1 open issue" or "3 open issues"."""
+    noun = "issue" if count == 1 else "issues"
+    return f"{count} {kind}{noun}"
 
 
 def _cut(text: str, room: int) -> str:

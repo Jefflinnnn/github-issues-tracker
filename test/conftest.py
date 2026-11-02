@@ -1,4 +1,4 @@
-"""Shared helpers: GraphQL-shaped issue nodes and a fake GitHub.
+"""Shared helpers: GraphQL-shaped issue nodes, a fake GitHub and model.
 
 The nodes follow the shape of ``extract``'s queries. Their values are made
 up to exercise each flag; no test needs the network or a token.
@@ -12,9 +12,12 @@ from typing import Any
 
 import pytest
 
+from triage.model import pricing
+from triage.model import provider
 from triage.pipeline import extract
 
 NOW = datetime.datetime(2026, 11, 2, 9, 0, tzinfo=datetime.timezone.utc)
+MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 REPOSITORY = {
     "id": "R_1",
     "nameWithOwner": "Owner/Repo",
@@ -138,6 +141,13 @@ def isolated(
     database = tmp_path / "triage.db"
     monkeypatch.setenv("TRIAGE_DB", str(database))
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    for key in (
+        "TRIAGE_MODEL",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "BEDROCK_ENDPOINT_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
     return database
 
 
@@ -145,3 +155,40 @@ def serve(monkeypatch: pytest.MonkeyPatch, github: FakeGitHub) -> FakeGitHub:
     """Routes the pipeline's GitHub requests to a fake."""
     monkeypatch.setattr(extract, "post_graphql", github)
     return github
+
+
+@dataclasses.dataclass
+class FakeModel:
+    """A provider that answers from a list of replies, then a default one.
+
+    Attributes:
+        replies: Replies to give first, in order.
+        default: The reply after ``replies`` run out.
+        requests: Every request received.
+        name: The provider's name.
+        model: The model ID.
+        price: $1.10 in, $5.50 out per million tokens; None for unknown.
+    """
+
+    replies: list[provider.Reply] = dataclasses.field(default_factory=list)
+    default: provider.Reply | None = None
+    requests: list[provider.Request] = dataclasses.field(default_factory=list)
+    name: str = "bedrock"
+    model: str = MODEL_ID
+    price: pricing.Price | None = pricing.Price(1.10, 5.50)
+
+    def classify(self, request: provider.Request) -> provider.Reply:
+        self.requests.append(request)
+        if self.replies:
+            return self.replies.pop(0)
+        return self.default or reply("bug")
+
+
+def reply(
+    tag: str | None, input_tokens: int = 1_000, output_tokens: int = 50
+) -> provider.Reply:
+    """Returns a reply with a tag, or an unusable one when tag is None."""
+    usage = provider.Usage(input_tokens, output_tokens)
+    if tag is None:
+        return provider.Reply(None, usage, "the model stopped early")
+    return provider.Reply({"tag": tag, "rationale": "Because."}, usage)

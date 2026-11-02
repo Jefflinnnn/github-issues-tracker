@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Summarize a GitHub repository's open issues from the terminal."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "boto3>=1.35",
+]
 
 [project.scripts]
 triage = "triage.cli:main"
@@ -49,6 +51,11 @@ python_version = "3.10"
 strict = true
 files = ["src", "test"]
 exclude = ["^\\.claude/"]
+
+# boto3 ships without type hints.
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*", "botocore", "botocore.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

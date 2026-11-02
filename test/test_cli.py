@@ -2,11 +2,14 @@ import pathlib
 
 import pytest
 from conftest import FakeGitHub
+from conftest import FakeModel
 from conftest import comment
 from conftest import issue
+from conftest import reply
 from conftest import serve
 
 from triage import cli
+from triage.model import bedrock
 
 
 def test_version_exits_cleanly(capsys: pytest.CaptureFixture[str]) -> None:
@@ -21,6 +24,8 @@ def test_summary_then_rerun_then_list(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    model = FakeModel(replies=[reply("question"), reply("feature")])
+    monkeypatch.setattr(bedrock, "from_settings", lambda name: model)
     serve(
         monkeypatch,
         FakeGitHub(
@@ -31,15 +36,22 @@ def test_summary_then_rerun_then_list(
     assert cli.main(["summary", "https://github.com/owner/repo"]) == 0
     first = capsys.readouterr().out
     assert first.startswith("Owner/Repo · 3 open · 1 hot · 1 stale")
+    assert "Tags: bug 1 · feature 1 · question 1" in first
     assert "First run: fetched 3 open issues." in first
+    assert len(model.requests) == 3
 
     # The rerun asks only for changes: #1 got a comment, #2 was closed.
+    # Only #1 goes back to the model; #3 keeps its tag.
     rerun = serve(
         monkeypatch,
         FakeGitHub(
             [
                 [
-                    issue(1, comments=[comment("maintainer", 0)]),
+                    issue(
+                        1,
+                        comments=[comment("maintainer", 0)],
+                        updated_days_ago=0,
+                    ),
                     issue(2, state="CLOSED"),
                 ]
             ],
@@ -49,8 +61,10 @@ def test_summary_then_rerun_then_list(
     assert cli.main(["summary", "owner/repo"]) == 0
     second = capsys.readouterr().out
     assert rerun.calls[0][0] == "changed"
+    assert len(model.requests) == 4
     assert second.startswith("Owner/Repo · 2 open · 1 hot · 0 stale")
     assert "2 issues changed since the last run" in second
+    assert "tagged 1 this run" in second
 
     assert cli.main(["list"]) == 0
     assert "Owner/Repo  2" in capsys.readouterr().out

@@ -17,6 +17,8 @@ from collections.abc import Sequence
 from triage import config
 from triage import repo_ref
 from triage import report
+from triage.model import bedrock
+from triage.model import provider
 from triage.pipeline import extract
 from triage.pipeline import load
 from triage.pipeline import run
@@ -28,8 +30,10 @@ _USER_ERRORS = (
     config.ConfigError,
     extract.GitHubError,
     load.LoadError,
+    provider.ProviderError,
     repo_ref.InvalidRepoRefError,
 )
+DEFAULT_BUDGET_USD = 0.50
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -61,11 +65,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _summary(args: argparse.Namespace, connection: sqlite3.Connection) -> None:
     """Runs the pipeline on one repository and prints its summary."""
+    repo = repo_ref.parse(args.repo)
+    token = config.github_token()
+    # Settings are checked before fetching, so a missing key fails fast.
+    model = bedrock.from_settings(args.model)
     result = run.run(
-        repo=repo_ref.parse(args.repo),
+        repo=repo,
         limit=args.limit,
-        token=config.github_token(),
+        token=token,
         connection=connection,
+        model=model,
+        budget_usd=args.budget_usd,
         now=datetime.datetime.now(datetime.timezone.utc),
     )
     width = shutil.get_terminal_size().columns
@@ -110,6 +120,25 @@ def _build_parser() -> argparse.ArgumentParser:
             "(default: 0, all of them)"
         ),
     )
+    summary.add_argument(
+        "--model",
+        choices=sorted(bedrock.MODELS),
+        default="",
+        help=(
+            "Claude model to tag with (default: TRIAGE_MODEL, then "
+            f"{bedrock.DEFAULT_MODEL})"
+        ),
+    )
+    summary.add_argument(
+        "--budget-usd",
+        type=_positive_dollars,
+        default=DEFAULT_BUDGET_USD,
+        metavar="USD",
+        help=(
+            "most the model may spend this run; issues left over are "
+            f"tagged next run (default: {DEFAULT_BUDGET_USD:.2f})"
+        ),
+    )
 
     commands.add_parser(
         "list",
@@ -129,6 +158,19 @@ def _non_negative_int(text: str) -> int:
         ) from None
     if value < 0:
         raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
+    return value
+
+
+def _positive_dollars(text: str) -> float:
+    """Parses a dollar amount above 0, for argparse."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"not a dollar amount: {text!r}"
+        ) from None
+    if not value > 0:
+        raise argparse.ArgumentTypeError(f"must be above 0, got {text}")
     return value
 
 
