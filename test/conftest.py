@@ -199,10 +199,22 @@ class FakeModel:
 
 
 def reply(
-    tag: str | None, input_tokens: int = 1_000, output_tokens: int = 50
+    tag: str | None,
+    input_tokens: int = 1_000,
+    output_tokens: int = 50,
+    **fields: str,
 ) -> provider.Reply:
-    """Returns a reply with a tag, or an unusable one when tag is None."""
+    """Returns a reply with a tag, or an unusable one when tag is None.
+
+    Bugs and features get the fields their tag needs, low and could-have
+    unless ``fields`` says otherwise.
+    """
     usage = provider.Usage(input_tokens, output_tokens)
     if tag is None:
         return provider.Reply(None, usage, "the model stopped early")
-    return provider.Reply({"tag": tag, "rationale": "Because."}, usage)
+    data = {"tag": tag, "rationale": "Because."}
+    if tag == "bug":
+        data |= {"severity": "low", "priority": "low"}
+    if tag == "feature":
+        data["moscow"] = "could-have"
+    return provider.Reply(data | fields, usage)

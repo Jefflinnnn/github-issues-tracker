@@ -21,6 +21,11 @@ def test_issue_is_fenced_cut_and_marks_who_wrote_what() -> None:
 
     assert text.startswith("<issue>") and text.endswith("</issue>")
     assert "[cut]" in text
+    # The model weighs priority by these, so it gets them as plain facts.
+    assert (
+        "Engagement: 0 reactions on the opening post, 5 comments, "
+        "1 other people commenting" in text
+    )
     assert "(2 earlier comments not shown)" in text
     roles = [line for line in text.splitlines() if line.startswith("Comment")]
     assert roles == [

@@ -220,6 +220,41 @@ def last_human_activity(issue: Issue) -> datetime.datetime:
     return max([issue.created_at, *human_comments])
 
 
+def other_commenters(issue: Issue) -> int:
+    """Counts the people besides the opener who commented, bots aside.
+
+    Only fetched comments are seen, so a long thread may have more.
+
+    Args:
+        issue: The issue.
+
+    Returns:
+        How many distinct people commented.
+    """
+    return len(
+        {
+            comment.author
+            for comment in issue.comments
+            if comment.author != issue.author and comment.author_type != _BOT
+        }
+    )
+
+
+def demand(issue: Issue) -> int:
+    """Scores how many people want an issue: reactions plus commenters.
+
+    Distinct commenters count rather than comments, so a long exchange
+    between two people doesn't look like demand.
+
+    Args:
+        issue: The issue.
+
+    Returns:
+        The demand score.
+    """
+    return issue.reaction_count + other_commenters(issue)
+
+
 def engagement(issue: Issue) -> int:
     """Returns an issue's reactions plus comments.
 

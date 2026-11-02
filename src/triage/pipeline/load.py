@@ -7,6 +7,7 @@ and the next run fetches everything again.
 
 import dataclasses
 import datetime
+import enum
 import json
 import logging
 import pathlib
@@ -14,11 +15,12 @@ import sqlite3
 from collections.abc import Sequence
 from typing import Any
 
+from triage.model import prompt
 from triage.pipeline import transform
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE repos (
@@ -85,7 +87,13 @@ CREATE TABLE tags (
     prompt_version    TEXT NOT NULL,
     tagged_at         TEXT NOT NULL,
     tag               TEXT NOT NULL,
-    rationale         TEXT NOT NULL
+    rationale         TEXT NOT NULL,
+    -- high or low; bugs only.
+    severity          TEXT,
+    priority          TEXT,
+    -- must-have, should-have or could-have, as the model chose it (before
+    -- the demand floor); features only.
+    moscow            TEXT
 );
 
 CREATE INDEX tags_by_issue ON tags(issue_id);
@@ -284,11 +292,8 @@ def save_run(
                 open_count,
             ),
         )
-    logger.info(
-        "Stored %d %s of %s",
-        len(issues),
-        "issue" if len(issues) == 1 else "issues",
-        repository["nameWithOwner"],
+    logger.debug(
+        "Stored %d %s", len(issues), "issue" if len(issues) == 1 else "issues"
     )
     if cursor.lastrowid is None:
         raise LoadError("SQLite didn't return the new run's ID.")
@@ -331,8 +336,7 @@ def finish_run(
 def save_tag(
     connection: sqlite3.Connection,
     issue: transform.Issue,
-    tag: str,
-    rationale: str,
+    tagging: prompt.Tagging,
     model: str,
     prompt_version: str,
 ) -> None:
@@ -341,8 +345,7 @@ def save_tag(
     Args:
         connection: An open database.
         issue: The issue that was tagged.
-        tag: Its main tag.
-        rationale: Why the model chose it.
+        tagging: What the model decided.
         model: The model ID.
         prompt_version: The prompt's version.
     """
@@ -350,8 +353,9 @@ def save_tag(
         connection.execute(
             """
             INSERT INTO tags (issue_id, issue_updated_at, model,
-                              prompt_version, tagged_at, tag, rationale)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                              prompt_version, tagged_at, tag, rationale,
+                              severity, priority, moscow)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 issue.id,
@@ -359,8 +363,11 @@ def save_tag(
                 model,
                 prompt_version,
                 _iso(datetime.datetime.now(datetime.timezone.utc)),
-                tag,
-                rationale,
+                tagging.tag.value,
+                tagging.rationale,
+                _value(tagging.severity),
+                _value(tagging.priority),
+                _value(tagging.moscow),
             ),
         )
 
@@ -370,7 +377,7 @@ def current_tags(
     name_with_owner: str,
     model: str,
     prompt_version: str,
-) -> dict[str, tuple[str, str]]:
+) -> dict[str, prompt.Tagging]:
     """Returns the tags that are up to date for a repository's issues.
 
     A tag is up to date when the issue hasn't changed since, and the same
@@ -383,11 +390,13 @@ def current_tags(
         prompt_version: The prompt version in use.
 
     Returns:
-        ``{issue ID: (tag, rationale)}``, the newest answer per issue.
+        ``{issue ID: tagging}``, the newest answer per issue.
     """
     rows = connection.execute(
         """
-        SELECT tags.issue_id, tags.tag, tags.rationale FROM tags
+        SELECT tags.issue_id, tags.tag, tags.rationale, tags.severity,
+               tags.priority, tags.moscow
+        FROM tags
         JOIN issues ON issues.id = tags.issue_id
         JOIN repos ON repos.id = issues.repo_id
         WHERE repos.name_with_owner = ?
@@ -397,7 +406,16 @@ def current_tags(
         """,
         (name_with_owner, model, prompt_version),
     ).fetchall()
-    return {issue_id: (tag, rationale) for issue_id, tag, rationale in rows}
+    return {
+        issue_id: prompt.Tagging(
+            tag=prompt.Tag(tag),
+            rationale=rationale,
+            severity=prompt.Level(severity) if severity else None,
+            priority=prompt.Level(priority) if priority else None,
+            moscow=prompt.Moscow(moscow) if moscow else None,
+        )
+        for issue_id, tag, rationale, severity, priority, moscow in rows
+    }
 
 
 def open_issues(
@@ -568,6 +586,11 @@ def _issue(
         reaction_count=row["reaction_count"],
         comments=comments,
     )
+
+
+def _value(member: enum.Enum | None) -> str | None:
+    """Returns an enum member's stored value, or None."""
+    return None if member is None else str(member.value)
 
 
 def _iso(moment: datetime.datetime) -> str:

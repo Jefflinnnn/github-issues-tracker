@@ -36,8 +36,12 @@ def test_summary_then_rerun_then_list(
     assert cli.main(["summary", "https://github.com/owner/repo"]) == 0
     first = capsys.readouterr().out
     assert first.startswith("Owner/Repo · 3 open · 1 hot · 1 stale")
-    assert "Tags: bug 1 · feature 1 · question 1" in first
-    assert "First run: fetched 3 open issues." in first
+    assert (
+        "Tags: bug 1 (0 high priority) · feature 1 (0 must-have) · question 1"
+        in first
+    )
+    assert "Run: first run, 3 fetched · 3 tagged · <$0.01 of $0.50" in first
+    assert "Open an issue" not in first
     assert len(model.requests) == 3
 
     # The rerun asks only for changes: #1 got a comment, #2 was closed.
@@ -63,8 +67,7 @@ def test_summary_then_rerun_then_list(
     assert rerun.calls[0][0] == "changed"
     assert len(model.requests) == 4
     assert second.startswith("Owner/Repo · 2 open · 1 hot · 0 stale")
-    assert "2 issues changed since the last run" in second
-    assert "tagged 1 this run" in second
+    assert "Run: 2 changed since last run · 1 tagged" in second
 
     assert cli.main(["list"]) == 0
     assert "Owner/Repo  2" in capsys.readouterr().out
@@ -114,7 +117,7 @@ def test_a_run_without_limit_fills_in_what_a_limited_run_left_out(
 
     assert [name for name, _ in github.calls] == ["open"]
     assert out.startswith("Owner/Repo · 2 open")
-    assert "Fetched all 2 open issues, to fill in" in out
+    assert "Run: all 2 open fetched" in out
 
 
 def test_limit_on_a_later_run_also_fetches_what_changed(
@@ -138,4 +141,77 @@ def test_limit_on_a_later_run_also_fetches_what_changed(
     assert [name for name, _ in github.calls] == ["open", "changed"]
     assert github.calls[0][1]["direction"] == "DESC"
     assert out.startswith("Owner/Repo · 2 open")
-    assert "Fetched the 1 most recently updated open issue of 2" in out
+    assert "Run: newest 1 of 2 open + changes" in out
+
+
+def test_limit_also_caps_what_the_model_tags(
+    isolated: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    model = FakeModel()
+    monkeypatch.setattr(providers, "from_settings", lambda name: model)
+    # The budget covers one request, so #2 and #3 stay untagged.
+    serve(
+        monkeypatch,
+        FakeGitHub(
+            [[issue(n, updated_days_ago=n) for n in (1, 2, 3)]], total_open=3
+        ),
+    )
+    assert cli.main(["summary", "owner/repo", "--budget-usd", "0.002"]) == 0
+    capsys.readouterr()
+    assert len(model.requests) == 1
+
+    # --limit 1 fetches only #3, so #2 waits even though it is untagged.
+    serve(
+        monkeypatch,
+        FakeGitHub(
+            [[issue(3, updated_days_ago=3)]], total_open=3, changed=[[]]
+        ),
+    )
+    assert cli.main(["summary", "owner/repo", "--limit", "1"]) == 0
+    out = capsys.readouterr().out
+
+    assert len(model.requests) == 2
+    assert "Title: Issue 3" in model.requests[-1].user
+    assert "untagged 1" in out
+    assert "· 1 tagged ·" in out
+
+
+def test_demand_raises_a_feature_to_must_have(
+    isolated: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    quiet = [issue(n) for n in range(1, 20)]
+    wanted = issue(20, reactions=40)
+    serve(monkeypatch, FakeGitHub([quiet + [wanted]], total_open=20))
+    # The model calls every request could-have.
+    model = FakeModel(default=reply("feature"))
+    monkeypatch.setattr(providers, "from_settings", lambda name: model)
+
+    assert cli.main(["summary", "owner/repo"]) == 0
+    out = capsys.readouterr().out
+
+    assert "feature 20 (1 must-have)" in out
+    assert "MOST-WANTED FEATURES: must-have (1)" in out
+    assert "#20     must-have ↑" in out
+
+
+def test_the_run_line_says_what_the_budget_left_out(
+    isolated: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    serve(
+        monkeypatch, FakeGitHub([[issue(1), issue(2), issue(3)]], total_open=3)
+    )
+    model = FakeModel(default=reply("question"))
+    monkeypatch.setattr(providers, "from_settings", lambda name: model)
+
+    assert cli.main(["summary", "owner/repo", "--budget-usd", "0.003"]) == 0
+    captured = capsys.readouterr()
+
+    assert "· 2 tagged · <$0.01 of $0.003 · 1 left for next run" in captured.out
+    # The Run line says it, so no warning repeats it.
+    assert captured.err == ""
