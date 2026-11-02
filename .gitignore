@@ -12,6 +12,8 @@
 CLAUDE.local.md
 # Personal notes, drafts and logs.
 *.local.md
+# PR descriptions drafted locally for gh pr create --body-file.
+.prs/
 
 # ── Python bytecode / builds ─────────────────────────────
 __pycache__/

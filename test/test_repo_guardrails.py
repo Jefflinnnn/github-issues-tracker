@@ -53,6 +53,7 @@ def _claude_deny_rules() -> list[str]:
         ".claude/settings.local.json",
         "CLAUDE.local.md",
         "notes.local.md",
+        ".prs/02-pipeline.md",
         ".venv/bin/python",
         "__pycache__/module.cpython-310.pyc",
     ],
