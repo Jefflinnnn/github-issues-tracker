@@ -18,7 +18,7 @@ from triage.pipeline import transform
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE repos (
@@ -68,8 +68,27 @@ CREATE TABLE runs (
     started_at      TEXT NOT NULL,
     finished_at     TEXT NOT NULL,
     issues_fetched  INTEGER NOT NULL,
-    open_count      INTEGER NOT NULL
+    open_count      INTEGER NOT NULL,
+    model           TEXT,
+    issues_tagged   INTEGER NOT NULL DEFAULT 0,
+    spent_usd       REAL NOT NULL DEFAULT 0
 );
+
+CREATE TABLE tags (
+    -- One row per model answer, so earlier tags stay for comparison.
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id          TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    -- The issue's updated_at when it was tagged; a newer one means the
+    -- issue changed and needs tagging again.
+    issue_updated_at  TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    prompt_version    TEXT NOT NULL,
+    tagged_at         TEXT NOT NULL,
+    tag               TEXT NOT NULL,
+    rationale         TEXT NOT NULL
+);
+
+CREATE INDEX tags_by_issue ON tags(issue_id);
 """
 
 
@@ -155,7 +174,7 @@ def save_run(
     issues: Sequence[transform.Issue],
     started_at: datetime.datetime,
     open_count: int,
-) -> None:
+) -> int:
     """Stores fetched issues and records the run, all or nothing.
 
     An issue's stored comments are replaced by the fetched ones, since
@@ -167,6 +186,9 @@ def save_run(
         issues: The fetched issues, open or closed.
         started_at: When the fetch began.
         open_count: Open issues on GitHub.
+
+    Returns:
+        The run's ID, for :func:`finish_run`.
     """
     with connection:
         connection.execute(
@@ -180,7 +202,7 @@ def save_run(
         )
         for issue in issues:
             _upsert_issue(connection, repository["id"], issue)
-        connection.execute(
+        cursor = connection.execute(
             """
             INSERT INTO runs (repo_id, started_at, finished_at,
                               issues_fetched, open_count)
@@ -195,8 +217,119 @@ def save_run(
             ),
         )
     logger.info(
-        "Stored %d issues of %s", len(issues), repository["nameWithOwner"]
+        "Stored %d %s of %s",
+        len(issues),
+        "issue" if len(issues) == 1 else "issues",
+        repository["nameWithOwner"],
     )
+    if cursor.lastrowid is None:
+        raise LoadError("SQLite didn't return the new run's ID.")
+    return cursor.lastrowid
+
+
+def finish_run(
+    connection: sqlite3.Connection,
+    run_id: int,
+    model: str,
+    issues_tagged: int,
+    spent_usd: float,
+) -> None:
+    """Records what the model step of a run did.
+
+    Args:
+        connection: An open database.
+        run_id: The ID :func:`save_run` returned.
+        model: The model ID the run used.
+        issues_tagged: Issues the model tagged.
+        spent_usd: What the requests cost.
+    """
+    with connection:
+        connection.execute(
+            """
+            UPDATE runs SET finished_at = ?, model = ?, issues_tagged = ?,
+                            spent_usd = ?
+            WHERE id = ?
+            """,
+            (
+                _iso(datetime.datetime.now(datetime.timezone.utc)),
+                model,
+                issues_tagged,
+                spent_usd,
+                run_id,
+            ),
+        )
+
+
+def save_tag(
+    connection: sqlite3.Connection,
+    issue: transform.Issue,
+    tag: str,
+    rationale: str,
+    model: str,
+    prompt_version: str,
+) -> None:
+    """Stores one model answer right away, so progress survives a crash.
+
+    Args:
+        connection: An open database.
+        issue: The issue that was tagged.
+        tag: Its main tag.
+        rationale: Why the model chose it.
+        model: The model ID.
+        prompt_version: The prompt's version.
+    """
+    with connection:
+        connection.execute(
+            """
+            INSERT INTO tags (issue_id, issue_updated_at, model,
+                              prompt_version, tagged_at, tag, rationale)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                issue.id,
+                _iso(issue.updated_at),
+                model,
+                prompt_version,
+                _iso(datetime.datetime.now(datetime.timezone.utc)),
+                tag,
+                rationale,
+            ),
+        )
+
+
+def current_tags(
+    connection: sqlite3.Connection,
+    name_with_owner: str,
+    model: str,
+    prompt_version: str,
+) -> dict[str, tuple[str, str]]:
+    """Returns the tags that are up to date for a repository's issues.
+
+    A tag is up to date when the issue hasn't changed since, and the same
+    model and prompt version produced it.
+
+    Args:
+        connection: An open database.
+        name_with_owner: ``owner/name``, in any casing.
+        model: The model ID in use.
+        prompt_version: The prompt version in use.
+
+    Returns:
+        ``{issue ID: (tag, rationale)}``, the newest answer per issue.
+    """
+    rows = connection.execute(
+        """
+        SELECT tags.issue_id, tags.tag, tags.rationale FROM tags
+        JOIN issues ON issues.id = tags.issue_id
+        JOIN repos ON repos.id = issues.repo_id
+        WHERE repos.name_with_owner = ?
+          AND tags.issue_updated_at = issues.updated_at
+          AND tags.model = ? AND tags.prompt_version = ?
+        ORDER BY tags.id
+        """,
+        (name_with_owner, model, prompt_version),
+    ).fetchall()
+    return {issue_id: (tag, rationale) for issue_id, tag, rationale in rows}
 
 
 def open_issues(
