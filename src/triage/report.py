@@ -111,11 +111,27 @@ def _model_line(result: run.RunResult) -> str:
 
 def _run_line(result: run.RunResult) -> str:
     """Says what this run fetched."""
+    since = (
+        f" since the last run ({_local(result.previous_run_at)})"
+        if result.previous_run_at
+        else ""
+    )
+    if result.fetch == "changes":
+        return f"{_issues(result.fetched)} changed{since}."
+    if result.fetch == "limited":
+        noun = "issue" if result.limit == 1 else "issues"
+        line = (
+            f"Fetched the {result.limit} most recently updated open {noun} "
+            f"of {result.open_on_github} on GitHub"
+        )
+        if result.previous_run_at:
+            line += f", plus what changed{since}"
+        return line + "."
     if result.previous_run_at is None:
         return f"First run: fetched {_issues(result.fetched, 'open ')}."
     return (
-        f"{_issues(result.fetched)} changed since the last run "
-        f"({_local(result.previous_run_at)})."
+        f"Fetched all {_issues(result.fetched, 'open ')}, to fill in what "
+        "earlier --limit runs left out."
     )
 
 

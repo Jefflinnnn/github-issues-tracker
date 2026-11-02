@@ -150,7 +150,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="fetch a repository's issues and summarize them",
         description=(
             "Fetch a repository's issues and summarize them. The first run "
-            "fetches open issues; later runs fetch what changed since."
+            "fetches every open issue; later runs fetch what changed since. "
+            "--limit caps how many open issues a run fetches."
         ),
     )
     summary.add_argument("repo", help="GitHub link, SSH remote or owner/name")
@@ -160,8 +161,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0,
         metavar="N",
         help=(
-            "first run only: fetch the N most recently updated open issues "
-            "(default: 0, all of them)"
+            "fetch the N most recently updated open issues, plus whatever "
+            "changed since the last run (default: 0, every open issue)"
         ),
     )
     summary.add_argument(

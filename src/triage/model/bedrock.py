@@ -234,6 +234,9 @@ def from_settings(
         config=botocore.config.Config(
             signature_version="v4",
             retries={"max_attempts": 3, "mode": "standard"},
+            # boto3 keeps 10 connections by default; more parallel requests
+            # than that each open and discard one, with a warning.
+            max_pool_connections=provider.MAX_PARALLEL_REQUESTS,
             connect_timeout=10,
             read_timeout=60,
         ),

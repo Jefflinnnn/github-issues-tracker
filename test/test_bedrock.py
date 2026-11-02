@@ -103,7 +103,11 @@ def test_picks_a_model_by_name(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
     monkeypatch.setenv("TRIAGE_MODEL", "sonnet")
 
-    assert bedrock.from_settings().model == bedrock.MODELS["sonnet"].id
+    model = bedrock.from_settings()
+    assert model.model == bedrock.MODELS["sonnet"].id
+    # Enough connections for the most parallel requests --workers allows.
+    pool = model._client.meta.config.max_pool_connections
+    assert pool == provider.MAX_PARALLEL_REQUESTS
     assert bedrock.from_settings("opus").model == bedrock.MODELS["opus"].id
     with pytest.raises(provider.ProviderError, match="Unknown model"):
         bedrock.from_settings("gpt")

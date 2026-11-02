@@ -199,6 +199,19 @@ The first run fetches every open issue, 100 per request. Later runs fetch
 only the issues that changed since the previous run, closed ones included,
 so a rerun is quick.
 
+To cap how many open issues a run fetches, pass `--limit`:
+
+```bash
+triage summary owner/name --limit 100
+```
+
+triage then fetches the 100 most recently updated open issues, plus
+whatever changed since the last run, so issues already stored never go
+stale. You can change the limit from run to run. A later run without
+`--limit` notices that issues were left out and fetches every open issue
+once to fill them in. Whenever a run sees every open issue, issues that
+GitHub no longer lists as open are marked closed.
+
 The model then gives each open issue one main tag for what it is at its
 core:
 
@@ -230,7 +243,7 @@ Options:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--limit N` (summary) | 0 (all) | First run only: fetch the N most recently updated open issues |
+| `--limit N` (summary) | 0 (all) | Fetch the N most recently updated open issues, plus what changed since the last run |
 | `--model NAME` (summary) | `TRIAGE_MODEL`, then `haiku` | `haiku`, `sonnet` or `opus` |
 | `--budget-usd USD` (summary) | 0.50 | Most the model may spend this run |
 | `--workers N` (summary) | 4 | Model requests sent at once, 1 to 64 |

@@ -81,3 +81,61 @@ def test_missing_token_explains_what_to_do(
 
     assert cli.main(["summary", "owner/repo"]) == 1
     assert "Run triage setup" in capsys.readouterr().err
+
+
+def _summary(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    github: FakeGitHub,
+    *args: str,
+) -> str:
+    serve(monkeypatch, github)
+    monkeypatch.setattr(providers, "from_settings", lambda name: FakeModel())
+    assert cli.main(["summary", "owner/repo", *args]) == 0
+    return capsys.readouterr().out
+
+
+def test_a_run_without_limit_fills_in_what_a_limited_run_left_out(
+    isolated: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _summary(
+        monkeypatch,
+        capsys,
+        FakeGitHub([[issue(1), issue(2)]], total_open=3),
+        "--limit",
+        "2",
+    )
+
+    # GitHub now lists #2 and #3; #1 was closed in the meantime.
+    github = FakeGitHub([[issue(2), issue(3)]], total_open=2)
+    out = _summary(monkeypatch, capsys, github)
+
+    assert [name for name, _ in github.calls] == ["open"]
+    assert out.startswith("Owner/Repo · 2 open")
+    assert "Fetched all 2 open issues, to fill in" in out
+
+
+def test_limit_on_a_later_run_also_fetches_what_changed(
+    isolated: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _summary(
+        monkeypatch,
+        capsys,
+        FakeGitHub([[issue(1), issue(2), issue(3)]], total_open=3),
+    )
+
+    github = FakeGitHub(
+        [[issue(3, updated_days_ago=0)]],
+        total_open=2,
+        changed=[[issue(2, state="CLOSED")]],
+    )
+    out = _summary(monkeypatch, capsys, github, "--limit", "1")
+
+    assert [name for name, _ in github.calls] == ["open", "changed"]
+    assert github.calls[0][1]["direction"] == "DESC"
+    assert out.startswith("Owner/Repo · 2 open")
+    assert "Fetched the 1 most recently updated open issue of 2" in out
