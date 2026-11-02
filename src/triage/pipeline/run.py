@@ -29,6 +29,11 @@ class RunResult:
         url: Link to the repository.
         previous_run_at: When the previous run started, or None on the
             first run.
+        fetch: How this run fetched: ``all`` (every open issue),
+            ``changes`` (only what changed since the previous run) or
+            ``limited`` (the most recently updated open issues, plus what
+            changed since the previous run).
+        limit: The ``--limit`` this run used; 0 for none.
         fetched: Issues fetched this run, open or closed.
         open_on_github: Open issues on GitHub right now.
         flagged: The stored open issues with their computed flags.
@@ -42,6 +47,8 @@ class RunResult:
     name_with_owner: str
     url: str
     previous_run_at: datetime.datetime | None
+    fetch: str
+    limit: int
     fetched: int
     open_on_github: int
     flagged: list[transform.FlaggedIssue]
@@ -63,15 +70,20 @@ def run(
 ) -> RunResult:
     """Fetches what's new for a repository, stores it and tags its issues.
 
-    The first run fetches open issues. Later runs fetch only issues that
-    changed since the previous run started, closed ones included. The model
-    then tags open issues that are new, changed or tagged under another
-    model or prompt version, most recently updated first.
+    Without a limit, a run fetches every open issue the first time, and
+    again whenever an earlier limited run left some out; otherwise it
+    fetches only what changed since the previous run, closures included.
+    With a limit, it fetches the ``limit`` most recently updated open
+    issues, plus everything that changed since the previous run, so
+    nothing stored goes stale. After a fetch that saw every open issue,
+    stored issues GitHub no longer lists as open are marked closed.
+
+    The model then tags open issues that are new, changed or tagged under
+    another model or prompt version, most recently updated first.
 
     Args:
         repo: The repository.
-        limit: Most open issues to fetch on the first run; 0 for all.
-            Later runs fetch every change and ignore it.
+        limit: Most recently updated open issues to fetch; 0 for all.
         token: A GitHub token that can read the repository.
         connection: An open database.
         model: The provider that tags issues.
@@ -83,20 +95,44 @@ def run(
         The run's result.
     """
     since = load.last_run_started(connection, repo.full_name)
-    if since is None:
+    if limit:
+        fetch = "limited"
         extracted = extract.fetch_open_issues(repo, limit, token)
-    else:
-        if limit:
-            logger.warning(
-                "--limit applies only to the first run; fetching every "
-                "issue changed since %s",
-                since,
-            )
+        saw_every_open = len(extracted.nodes) >= extracted.total_open
+        nodes = {node["id"]: node for node in extracted.nodes}
+        if since is not None:
+            changes = extract.fetch_changed_issues(repo, since, token)
+            # The newest copy of each issue wins.
+            for node in changes.nodes:
+                kept = nodes.get(node["id"])
+                if kept is None or node["updatedAt"] >= kept["updatedAt"]:
+                    nodes[node["id"]] = node
+        fetched_nodes = list(nodes.values())
+    elif since is not None and load.is_complete(connection, repo.full_name):
+        fetch = "changes"
         extracted = extract.fetch_changed_issues(repo, since, token)
-    issues = [transform.to_issue(node) for node in extracted.nodes]
+        saw_every_open = False
+        fetched_nodes = extracted.nodes
+    else:
+        fetch = "all"
+        extracted = extract.fetch_open_issues(repo, 0, token)
+        saw_every_open = True
+        fetched_nodes = extracted.nodes
+    open_ids = {node["id"] for node in extracted.nodes}
+    issues = [transform.to_issue(node) for node in fetched_nodes]
     run_id = load.save_run(
         connection, extracted.repository, issues, now, extracted.total_open
     )
+    if saw_every_open:
+        closed = load.close_missing(
+            connection, extracted.repository["id"], open_ids, now
+        )
+        if closed:
+            logger.info(
+                "Marked %d %s closed that GitHub no longer lists as open",
+                closed,
+                "issue" if closed == 1 else "issues",
+            )
     name = extracted.repository["nameWithOwner"]
     stored = load.open_issues(connection, name)
 
@@ -126,6 +162,8 @@ def run(
         name_with_owner=name,
         url=extracted.repository["url"],
         previous_run_at=transform.parse_time(since) if since else None,
+        fetch=fetch,
+        limit=limit,
         fetched=len(issues),
         open_on_github=extracted.total_open,
         flagged=transform.flag_issues(stored, now),

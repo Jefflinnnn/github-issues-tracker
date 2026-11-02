@@ -95,11 +95,14 @@ class FakeGitHub:
     Attributes:
         pages: Issue nodes per page, served in order for each query.
         total_open: What GitHub reports as the open-issue count.
+        changed: Pages for the changed-since query, when it should answer
+            differently from the open-issues query.
         calls: The query name and variables of every request.
     """
 
     pages: list[list[dict[str, Any]]]
     total_open: int = 0
+    changed: list[list[dict[str, Any]]] | None = None
     calls: list[tuple[str, dict[str, Any]]] = dataclasses.field(
         default_factory=list
     )
@@ -109,8 +112,11 @@ class FakeGitHub:
     ) -> dict[str, Any]:
         name = "changed" if "$since" in query else "open"
         self.calls.append((name, variables))
+        pages = (
+            self.changed if name == "changed" and self.changed else self.pages
+        )
         index = int(variables["after"] or 0)
-        has_next = index + 1 < len(self.pages)
+        has_next = index + 1 < len(pages)
         return {
             "data": {
                 "repository": {
@@ -121,7 +127,7 @@ class FakeGitHub:
                             "hasNextPage": has_next,
                             "endCursor": str(index + 1) if has_next else None,
                         },
-                        "nodes": self.pages[index],
+                        "nodes": pages[index],
                     },
                 }
             }

@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 ATTEMPTS = 2
 DEFAULT_WORKERS = 4
-MAX_WORKERS = 64
+MAX_WORKERS = provider.MAX_PARALLEL_REQUESTS
 
 SaveTag = Callable[[transform.Issue, prompt.Tag, str], None]
 

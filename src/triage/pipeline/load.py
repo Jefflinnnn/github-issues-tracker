@@ -168,6 +168,74 @@ def last_run_started(
     return started
 
 
+def is_complete(connection: sqlite3.Connection, name_with_owner: str) -> bool:
+    """Says whether every open issue of a repository is stored.
+
+    An earlier run with ``--limit`` may have fetched only some. The stored
+    set counts as complete when it holds at least as many open issues as
+    GitHub reported at the latest run; later runs then only need changes.
+
+    Args:
+        connection: An open database.
+        name_with_owner: ``owner/name``, in any casing.
+
+    Returns:
+        True when nothing is missing; False after a limited run, or when
+        the tool hasn't run on the repository.
+    """
+    row = connection.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM issues
+             WHERE issues.repo_id = repos.id AND issues.state = 'OPEN'),
+            (SELECT runs.open_count FROM runs
+             WHERE runs.repo_id = repos.id ORDER BY runs.id DESC LIMIT 1)
+        FROM repos WHERE repos.name_with_owner = ?
+        """,
+        (name_with_owner,),
+    ).fetchone()
+    if row is None or row[1] is None:
+        return False
+    stored, on_github = row
+    return bool(stored >= on_github)
+
+
+def close_missing(
+    connection: sqlite3.Connection,
+    repo_id: str,
+    open_ids: set[str],
+    now: datetime.datetime,
+) -> int:
+    """Marks stored open issues closed when GitHub no longer lists them.
+
+    Call it only after fetching every open issue: then an issue missing
+    from the fetch was closed, deleted or transferred.
+
+    Args:
+        connection: An open database.
+        repo_id: GitHub's ID for the repository.
+        open_ids: IDs of every issue GitHub lists as open.
+        now: When the fetch ran; stored as the closing time.
+
+    Returns:
+        How many issues were marked closed.
+    """
+    stored = [
+        issue_id
+        for (issue_id,) in connection.execute(
+            "SELECT id FROM issues WHERE repo_id = ? AND state = 'OPEN'",
+            (repo_id,),
+        )
+    ]
+    missing = [issue_id for issue_id in stored if issue_id not in open_ids]
+    with connection:
+        connection.executemany(
+            "UPDATE issues SET state = 'CLOSED', closed_at = ? WHERE id = ?",
+            [(_iso(now), issue_id) for issue_id in missing],
+        )
+    return len(missing)
+
+
 def save_run(
     connection: sqlite3.Connection,
     repository: dict[str, Any],

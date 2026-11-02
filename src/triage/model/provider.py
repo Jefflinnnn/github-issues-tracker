@@ -62,6 +62,12 @@ class Reply:
     problem: str = ""
 
 
+# Most requests the classifier sends at once. Providers size their
+# connection pools for it, so parallel requests don't open throwaway
+# connections.
+MAX_PARALLEL_REQUESTS = 64
+
+
 class ProviderError(RuntimeError):
     """A failure that stops the run, such as a rejected key."""
 
