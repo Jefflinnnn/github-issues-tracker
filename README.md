@@ -245,32 +245,63 @@ model's choice, and it's recomputed on every run, so a request that picks
 up support rises without being sent to the model again. The summary marks
 raised features with ↑.
 
+Any issue may also get one subtag, for what is happening with it now. The
+model judges it from the latest comments:
+
+| Subtag | Meaning |
+| --- | --- |
+| `fix-failed` | A fix was released, and someone says the problem still happens |
+| `fix-released` | A fix or the feature was released; nobody has confirmed it yet |
+| `fix-confirmed` | A fix or the feature was released, and someone says it works |
+| `fix-in-progress` | A pull request is open, or a fix is merged but not released |
+| `needs-info` | Someone asked the opener for details, with no answer since |
+| `duplicate` | Someone pointed to another issue that covers the same thing |
+
+Most issues have none.
+
 The model reads the title, labels, opening post and the 10 latest
-comments, and gives a one-sentence reason with its tags. An issue goes
-back to the model only when it changes, so a rerun costs little. The
+comments. Along with its tags, it writes a one-sentence summary of what
+the issue is about and a one-sentence reason for the tags. An issue goes
+back to the model only when it changes, so a rerun costs little. Hot
+issues go to the model first, busiest first, then the rest, newest first,
+so if the budget runs out, what's left untagged is the least pressing. The
 summary counts issues per tag and lists them in groups, up to 10 per
 group:
 
-- **Bugs to fix first**: high-priority bugs, high severity first.
-- **Most-wanted features**: must-have features, by demand.
+- **Fix didn't work**: `fix-failed` issues, busiest first.
+- **Bugs to fix first**: high-priority bugs, high severity first. Bugs
+  with a subtag are left out, since a fix, the opener or another issue
+  already holds them.
+- **Most-wanted features**: must-have features, by demand, except those
+  already released or duplicated.
+- **Probably closable**: `fix-released`, `fix-confirmed` and `duplicate`
+  issues, idle longest first.
 - **Hot**: among the busiest tenth of open issues by reactions plus
   comments, with at least 3.
 - **Stale**: no comment from a person in 60 days. Bot comments and label
   edits don't count.
 
+Each listed issue shows the model's summary instead of its title, since
+titles are often vague; an issue the model hasn't tagged yet shows its
+title. In the Probably closable, Hot and Stale groups, an issue's subtag
+shows at the end of its line. The reason for the tags is stored, not
+shown.
+
 While it runs, triage shows its progress on one line of the terminal: a
 bar for fetching, then one for tagging. The line disappears when the run
-ends, and the summary starts with three header lines:
+ends, and the summary starts with a short header:
 
 ```text
 owner/name · 150 open · 12 hot · 31 stale
 Tags: bug 41 (6 high priority) · feature 52 (4 must-have) · question 30 · docs 9 · other 6
+Subtags: fix-failed 5 · fix-released 7 · fix-confirmed 3 · fix-in-progress 6 · needs-info 2
 Run: first run, 150 fetched · 138 tagged · $0.29 of $0.30 · 12 left for next run
 ```
 
-The Run line says what this run fetched, how many issues the model tagged,
-what that cost against `--budget-usd`, and how many issues the budget left
-for the next run. It names any issues whose replies were unusable twice.
+The Subtags line appears once any issue has a subtag. The Run line says
+what this run fetched, how many issues the model tagged, what that cost
+against `--budget-usd`, and how many issues the budget left for the next
+run. It names any issues whose replies were unusable twice.
 Warnings print above the summary, separated by a blank line.
 
 Show the repositories you've summarized:

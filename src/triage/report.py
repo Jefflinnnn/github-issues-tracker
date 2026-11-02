@@ -11,6 +11,12 @@ from triage.pipeline import transform
 
 # Issues listed per section; the rest are counted.
 SECTION_LIMIT = 10
+# Subtags that mean an issue can likely be closed.
+_CLOSABLE = {
+    prompt.Subtag.FIX_RELEASED,
+    prompt.Subtag.FIX_CONFIRMED,
+    prompt.Subtag.DUPLICATE,
+}
 # Issue numbers the Run line names when replies were unusable.
 SKIPPED_SHOWN = 5
 
@@ -36,7 +42,23 @@ def summary(result: run.RunResult, width: int) -> str:
     def label(item: transform.FlaggedIssue) -> str:
         return _label(tagging(item), item.issue.id in result.raised)
 
+    def headline(item: transform.FlaggedIssue) -> str:
+        found = tagging(item)
+        return found.summary if found and found.summary else item.issue.title
+
+    def subtag(item: transform.FlaggedIssue) -> prompt.Subtag | None:
+        found = tagging(item)
+        return found.subtag if found else None
+
     hot = sorted(having(transform.Flag.HOT), key=lambda i: -i.engagement)
+    fix_failed = sorted(
+        (i for i in flagged if subtag(i) is prompt.Subtag.FIX_FAILED),
+        key=lambda i: -i.engagement,
+    )
+    closable = sorted(
+        (i for i in flagged if subtag(i) in _CLOSABLE),
+        key=lambda i: -i.idle_days,
+    )
     stale = sorted(having(transform.Flag.STALE), key=lambda i: -i.idle_days)
     urgent_bugs = sorted(
         (
@@ -45,6 +67,8 @@ def summary(result: run.RunResult, width: int) -> str:
             if (found := tagging(item)) is not None
             and found.tag is prompt.Tag.BUG
             and found.priority is prompt.Level.HIGH
+            # Someone already holds it: a fix, the opener or another issue.
+            and found.subtag is None
         ),
         # High severity first, then the busiest.
         key=lambda i: (
@@ -58,37 +82,64 @@ def summary(result: run.RunResult, width: int) -> str:
             for item in flagged
             if (found := tagging(item)) is not None
             and found.moscow is prompt.Moscow.MUST
+            and found.subtag not in _CLOSABLE
         ),
         key=lambda i: -transform.demand(i.issue),
     )
 
-    lines = [
+    taggings = [tagging(item) for item in flagged]
+    header = [
         f"{result.name_with_owner} · {len(flagged)} open · "
         f"{len(hot)} hot · {len(stale)} stale",
-        _tag_counts([tagging(item) for item in flagged]),
+        _tag_counts(taggings),
+        _subtag_counts(taggings),
         _run_line(result),
-        "",
     ]
+    lines = [line for line in header if line] + [""]
+    lines += _section(
+        "FIX DIDN'T WORK: a released fix, still reported",
+        fix_failed,
+        lambda i: f"{label(i):<15} {i.engagement} reacts+comments",
+        headline,
+        width,
+    )
     lines += _section(
         "BUGS TO FIX FIRST: high priority",
         urgent_bugs,
         lambda i: f"{label(i):<15} {i.engagement} reacts+comments",
+        headline,
         width,
     )
     lines += _section(
         "MOST-WANTED FEATURES: must-have",
         wanted,
         lambda i: f"{label(i):<15} demand {transform.demand(i.issue)}",
+        headline,
         width,
+    )
+    lines += _section(
+        "PROBABLY CLOSABLE: fix released or confirmed, or duplicate",
+        closable,
+        lambda i: f"{label(i):<15} idle {i.idle_days}d",
+        headline,
+        width,
+        subtag,
     )
     lines += _section(
         "HOT",
         hot,
         lambda i: f"{label(i):<15} {i.engagement} reacts+comments",
+        headline,
         width,
+        subtag,
     )
     lines += _section(
-        "STALE", stale, lambda i: f"{label(i):<15} idle {i.idle_days}d", width
+        "STALE",
+        stale,
+        lambda i: f"{label(i):<15} idle {i.idle_days}d",
+        headline,
+        width,
+        subtag,
     )
     if result.raised:
         lines.append(
@@ -158,6 +209,16 @@ def _tag_counts(taggings: Sequence[prompt.Tagging | None]) -> str:
     return "Tags: " + " · ".join(parts)
 
 
+def _subtag_counts(taggings: Sequence[prompt.Tagging | None]) -> str:
+    """Counts open issues per subtag; empty when none has one."""
+    parts = []
+    for subtag in prompt.Subtag:
+        count = sum(t is not None and t.subtag is subtag for t in taggings)
+        if count:
+            parts.append(f"{subtag.value} {count}")
+    return "Subtags: " + " · ".join(parts) if parts else ""
+
+
 def _run_line(result: run.RunResult) -> str:
     """Says in one line what this run fetched, tagged and spent."""
     outcome = result.outcome
@@ -204,15 +265,25 @@ def _section(
     title: str,
     items: Sequence[transform.FlaggedIssue],
     detail: Callable[[transform.FlaggedIssue], str],
+    headline: Callable[[transform.FlaggedIssue], str],
     width: int,
+    subtag: Callable[[transform.FlaggedIssue], prompt.Subtag | None]
+    | None = None,
 ) -> list[str]:
-    """Returns one section: a heading, up to SECTION_LIMIT issues, a count."""
+    """Returns one section: a heading, up to SECTION_LIMIT issues, a count.
+
+    Each issue shows ``headline``: the model's summary, or the title of an
+    issue without one. With ``subtag``, an issue that has one shows it last.
+    """
     if not items:
         return []
     lines = [f"{title} ({len(items)})"]
     for item in items[:SECTION_LIMIT]:
         prefix = f"  #{item.issue.number:<6} {detail(item):<34} "
-        lines.append(prefix + _cut(item.issue.title, width - len(prefix)))
+        found = subtag(item) if subtag else None
+        suffix = f" [{found.value}]" if found else ""
+        room = width - len(prefix) - len(suffix)
+        lines.append(prefix + _cut(headline(item), room) + suffix)
     if len(items) > SECTION_LIMIT:
         lines.append(f"  … and {len(items) - SECTION_LIMIT} more")
     lines.append("")

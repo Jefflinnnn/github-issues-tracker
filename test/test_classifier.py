@@ -145,7 +145,9 @@ def test_workers_out_of_range_are_refused() -> None:
 
 def test_a_bug_needs_severity_and_priority() -> None:
     usage = provider.Usage(1, 1)
-    bare = provider.Reply({"tag": "bug", "rationale": "Crash."}, usage)
+    bare = provider.Reply(
+        {"tag": "bug", "summary": "It crashes.", "rationale": "Crash."}, usage
+    )
 
     with pytest.raises(classifier.InvalidReplyError, match="severity"):
         classifier.validate(bare)
@@ -162,3 +164,31 @@ def test_fields_for_another_tag_are_dropped() -> None:
 
     assert tagging.tag is prompt.Tag.QUESTION
     assert tagging.moscow is None
+
+
+def test_a_subtag_is_optional_for_any_tag() -> None:
+    question = classifier.validate(reply("question", subtag="duplicate"))
+    bug = classifier.validate(reply("bug", subtag="fix-failed"))
+
+    assert question.subtag is prompt.Subtag.DUPLICATE
+    assert bug.subtag is prompt.Subtag.FIX_FAILED
+    assert classifier.validate(reply("bug")).subtag is None
+    assert classifier.validate(reply("bug", subtag="none")).subtag is None
+    with pytest.raises(classifier.InvalidReplyError, match="subtag"):
+        classifier.validate(reply("bug", subtag="wontfix"))
+
+
+def test_a_reply_needs_a_summary_and_a_long_one_is_cut() -> None:
+    usage = provider.Usage(1, 1)
+    bare = provider.Reply({"tag": "docs", "rationale": "Typo."}, usage)
+
+    with pytest.raises(classifier.InvalidReplyError, match="summary"):
+        classifier.validate(bare)
+
+    slightly_long = ("word " * 22).strip()  # 109 characters: kept whole.
+    kept = classifier.validate(reply("docs", summary=slightly_long)).summary
+    assert kept == slightly_long
+
+    cut = classifier.validate(reply("docs", summary="word " * 60)).summary
+    assert len(cut) <= prompt.SUMMARY_HARD_MAX_CHARS
+    assert cut.endswith("word…")

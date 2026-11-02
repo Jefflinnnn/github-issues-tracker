@@ -42,6 +42,7 @@ def test_summary_then_rerun_then_list(
     )
     assert "Run: first run, 3 fetched · 3 tagged · <$0.01 of $0.50" in first
     assert "Open an issue" not in first
+    assert "Subtags:" not in first
     assert len(model.requests) == 3
 
     # The rerun asks only for changes: #1 got a comment, #2 was closed.
@@ -144,6 +145,34 @@ def test_limit_on_a_later_run_also_fetches_what_changed(
     assert "Run: newest 1 of 2 open + changes" in out
 
 
+def test_hot_issues_are_tagged_first(
+    isolated: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    serve(
+        monkeypatch,
+        FakeGitHub(
+            [
+                [
+                    issue(1, updated_days_ago=0),
+                    issue(2, updated_days_ago=30, reactions=9),
+                    issue(3, updated_days_ago=1),
+                ]
+            ],
+            total_open=3,
+        ),
+    )
+    model = FakeModel()
+    monkeypatch.setattr(providers, "from_settings", lambda name: model)
+
+    # The budget covers one request: it goes to hot #2, not newest #1.
+    assert cli.main(["summary", "owner/repo", "--budget-usd", "0.002"]) == 0
+
+    assert len(model.requests) == 1
+    assert "Title: Issue 2" in model.requests[0].user
+
+
 def test_limit_also_caps_what_the_model_tags(
     isolated: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -176,6 +205,48 @@ def test_limit_also_caps_what_the_model_tags(
     assert "Title: Issue 3" in model.requests[-1].user
     assert "untagged 1" in out
     assert "· 1 tagged ·" in out
+
+
+def test_subtags_sort_issues_into_their_own_groups(
+    isolated: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    serve(
+        monkeypatch,
+        FakeGitHub(
+            [[issue(n, updated_days_ago=n) for n in (1, 2, 3, 4)]], total_open=4
+        ),
+    )
+    model = FakeModel(
+        replies=[
+            reply("bug", severity="high", priority="high", subtag="fix-failed"),
+            reply(
+                "bug",
+                severity="high",
+                priority="high",
+                subtag="fix-in-progress",
+            ),
+            reply("bug", severity="high", priority="high"),
+            reply("feature", subtag="duplicate", summary="Same as #9"),
+        ]
+    )
+    monkeypatch.setattr(providers, "from_settings", lambda name: model)
+
+    # One worker, so replies go to issues newest first: #1, #2, #3, #4.
+    assert cli.main(["summary", "owner/repo", "--workers", "1"]) == 0
+    out = capsys.readouterr().out
+
+    assert "Subtags: fix-failed 1 · fix-in-progress 1 · duplicate 1\n" in out
+    fix_failed = out.split("FIX DIDN'T WORK")[1].split("\n\n")[0]
+    assert "#1 " in fix_failed
+    # A bug someone is already fixing isn't on the to-fix list.
+    to_fix = out.split("BUGS TO FIX FIRST")[1].split("\n\n")[0]
+    assert "#3 " in to_fix
+    assert "#1 " not in to_fix and "#2 " not in to_fix
+    closable = out.split("PROBABLY CLOSABLE")[1].split("\n\n")[0]
+    # The model's summary replaces the title.
+    assert "Same as #9 [duplicate]" in closable
 
 
 def test_demand_raises_a_feature_to_must_have(
