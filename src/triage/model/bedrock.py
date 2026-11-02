@@ -3,14 +3,12 @@
 Requests use Bedrock's Converse API through boto3, signed with an AWS key
 pair (SigV4), and go to AWS directly or to an organization's gateway. The
 reply comes back as a tool call, so the JSON matches the schema's shape.
-The call is forced where the model allows it; models that refuse a forced
-call, such as Sonnet 5.5, get the tool offered instead, and the prompt
-tells them to use it.
+The tool is offered, not forced: Claude models such as Sonnet 5.5 refuse a
+forced call, and the prompt tells the model to use it.
 
 You pick one of three models by name: haiku, sonnet or opus.
 """
 
-import dataclasses
 import logging
 import os
 import pathlib
@@ -34,30 +32,18 @@ TOOL_NAME = "tag_issue"
 DEFAULT_REGION = "us-west-2"
 
 
-@dataclasses.dataclass(frozen=True)
-class Model:
-    """One of the models triage offers.
-
-    Attributes:
-        id: The Bedrock model ID.
-        price: Bedrock's list price for it; ``us.`` IDs cost 10% more
-            than Anthropic's API.
-    """
-
-    id: str
-    price: pricing.Price
-
-
 # Prices from https://aws.amazon.com/bedrock/pricing/ (Anthropic tab,
 # US West (Oregon)), checked 2026-10-31.
 MODELS = {
-    "haiku": Model(
+    "haiku": provider.Model(
         "us.anthropic.claude-haiku-4-5-20251001-v1:0", pricing.Price(1.10, 5.50)
     ),
-    "sonnet": Model(
+    "sonnet": provider.Model(
         "us.anthropic.claude-sonnet-5-5", pricing.Price(2.20, 11.00)
     ),
-    "opus": Model("us.anthropic.claude-opus-5-5", pricing.Price(4.40, 22.00)),
+    "opus": provider.Model(
+        "us.anthropic.claude-opus-5-5", pricing.Price(4.40, 22.00)
+    ),
 }
 DEFAULT_MODEL = "haiku"
 
@@ -90,7 +76,7 @@ class BedrockProvider:
         price: The model's price, for the budget.
     """
 
-    def __init__(self, model: Model, client: Any) -> None:
+    def __init__(self, model: provider.Model, client: Any) -> None:
         """Wraps a ``bedrock-runtime`` client.
 
         Args:
@@ -102,7 +88,6 @@ class BedrockProvider:
         self.model = model.id
         self.price: pricing.Price | None = model.price
         self._client = client
-        self._force_tool = True
 
     def check(self) -> None:
         """Sends one tiny request to confirm the key pair and model work.
@@ -142,25 +127,15 @@ class BedrockProvider:
         """
         import botocore.exceptions
 
-        while True:
-            try:
-                response = self._converse(request)
-                break
-            except botocore.exceptions.ClientError as error:
-                if self._force_tool and _refuses_forced_tool(error):
-                    logger.info(
-                        "%s refuses a forced tool call; offering the tool "
-                        "instead",
-                        self.model,
-                    )
-                    self._force_tool = False
-                    continue
-                raise _client_error(error, self.model) from error
-            except botocore.exceptions.BotoCoreError as error:
-                raise provider.ProviderError(
-                    f"Couldn't reach Bedrock ({error}). Check your "
-                    "connection and BEDROCK_ENDPOINT_URL, then run again."
-                ) from error
+        try:
+            response = self._converse(request)
+        except botocore.exceptions.ClientError as error:
+            raise _client_error(error, self.model) from error
+        except botocore.exceptions.BotoCoreError as error:
+            raise provider.ProviderError(
+                f"Couldn't reach Bedrock ({error}). Check your connection "
+                "and BEDROCK_ENDPOINT_URL, then run again."
+            ) from error
         usage = provider.Usage(
             input_tokens=response["usage"]["inputTokens"],
             output_tokens=response["usage"]["outputTokens"],
@@ -188,9 +163,6 @@ class BedrockProvider:
 
     def _converse(self, request: provider.Request) -> Any:
         """Sends one Converse request offering the tagging tool."""
-        tool_choice: dict[str, Any] = (
-            {"tool": {"name": TOOL_NAME}} if self._force_tool else {"auto": {}}
-        )
         return self._client.converse(
             modelId=self.model,
             system=[{"text": request.system}],
@@ -206,7 +178,7 @@ class BedrockProvider:
                         }
                     }
                 ],
-                "toolChoice": tool_choice,
+                "toolChoice": {"auto": {}},
             },
         )
 
@@ -231,14 +203,11 @@ def from_settings(
     Raises:
         ProviderError: A setting is missing or names no known model.
     """
-    name = (
-        model_name or config.get("TRIAGE_MODEL", env_file) or DEFAULT_MODEL
-    ).lower()
-    if name not in MODELS:
-        raise provider.ProviderError(
-            f"Unknown model {name!r}. Pick {', '.join(MODELS)} with --model "
-            "or TRIAGE_MODEL."
-        )
+    model = provider.pick_model(
+        MODELS,
+        model_name or config.get("TRIAGE_MODEL", env_file),
+        DEFAULT_MODEL,
+    )
     keys = {key: config.get(key, env_file) for key in _REQUIRED}
     missing = [key for key, value in keys.items() if not value]
     if missing:
@@ -269,13 +238,7 @@ def from_settings(
             read_timeout=60,
         ),
     )
-    return BedrockProvider(MODELS[name], client)
-
-
-def _refuses_forced_tool(error: "botocore.exceptions.ClientError") -> bool:
-    """Says whether Bedrock refused the request for forcing a tool call."""
-    message = error.response.get("Error", {}).get("Message", "")
-    return "tool_choice" in message.lower()
+    return BedrockProvider(model, client)
 
 
 def _client_error(

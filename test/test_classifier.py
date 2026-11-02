@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 from conftest import FakeModel
 from conftest import issue
@@ -12,14 +15,19 @@ ISSUES = [transform.to_issue(issue(n)) for n in (1, 2, 3)]
 
 
 def _run(
-    model: FakeModel, budget: float = 1.0
+    model: FakeModel,
+    budget: float = 1.0,
+    workers: int = 1,
+    issues: list[transform.Issue] = ISSUES,
 ) -> tuple[classifier.Outcome, dict[int, str]]:
     saved: dict[int, str] = {}
 
     def save(item: transform.Issue, tag: prompt.Tag, rationale: str) -> None:
+        assert threading.current_thread() is threading.main_thread()
         saved[item.number] = tag.value
 
-    return classifier.classify(ISSUES, model, budget, save), saved
+    outcome = classifier.classify(issues, model, budget, save, workers)
+    return outcome, saved
 
 
 def test_tags_every_issue_and_adds_up_spend() -> None:
@@ -62,3 +70,59 @@ def test_a_model_without_a_price_sends_nothing() -> None:
     with pytest.raises(provider.ProviderError, match="no price"):
         _run(model)
     assert model.requests == []
+
+
+class SlowModel(FakeModel):
+    """Takes a moment per request and records how many ran at once."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lock = threading.Lock()
+        self.running = 0
+        self.most_at_once = 0
+
+    def classify(self, request: provider.Request) -> provider.Reply:
+        with self.lock:
+            self.running += 1
+            self.most_at_once = max(self.most_at_once, self.running)
+        time.sleep(0.02)
+        with self.lock:
+            self.running -= 1
+        return super().classify(request)
+
+
+def test_workers_run_in_parallel_after_the_first_request() -> None:
+    model = SlowModel()
+    many = [transform.to_issue(issue(n)) for n in range(1, 21)]
+
+    outcome, saved = _run(model, workers=8, issues=many)
+
+    assert len(saved) == 20
+    assert outcome.tagged == 20
+    assert 1 < model.most_at_once <= 8
+
+
+def test_parallel_requests_stay_within_the_budget() -> None:
+    model = SlowModel()
+    many = [transform.to_issue(issue(n)) for n in range(1, 41)]
+
+    # Each request costs $0.001375, so $0.01 covers 7 of them.
+    outcome, saved = _run(model, budget=0.01, workers=16, issues=many)
+
+    assert outcome.spent_usd <= 0.01
+    assert len(saved) == 7
+    assert outcome.left_for_budget == 33
+
+
+def test_a_provider_error_stops_the_pass() -> None:
+    class Broken(FakeModel):
+        def classify(self, request: provider.Request) -> provider.Reply:
+            raise provider.ProviderError("key rejected")
+
+    with pytest.raises(provider.ProviderError, match="key rejected"):
+        _run(Broken(), workers=4)
+
+
+def test_workers_out_of_range_are_refused() -> None:
+    with pytest.raises(ValueError, match="1 to 64"):
+        _run(FakeModel(), workers=65)

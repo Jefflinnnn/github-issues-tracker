@@ -28,10 +28,10 @@ _triage() {
       case $prev in
         --model)
           COMPREPLY=($(compgen -W $'haiku\nsonnet\nopus' -- "$cur")) ;;
-        --limit|--budget-usd) ;;
+        --limit|--budget-usd|--workers) ;;
         *)
           if [[ $cur == -* ]]; then
-            COMPREPLY=($(compgen -W $'--limit\n--model\n--budget-usd' \
+            COMPREPLY=($(compgen -W $'--limit\n--model\n--budget-usd\n--workers' \
               -- "$cur"))
           else
             COMPREPLY=($(compgen -W "$(triage list --names 2>/dev/null)" \
@@ -68,10 +68,10 @@ _triage() {
     summary)
       case ${words[CURRENT-1]} in
         --model) compadd haiku sonnet opus ;;
-        --limit|--budget-usd) ;;
+        --limit|--budget-usd|--workers) ;;
         *)
           if [[ ${words[CURRENT]} == -* ]]; then
-            compadd -- --limit --model --budget-usd
+            compadd -- --limit --model --budget-usd --workers
           else
             repos=(${(f)"$(triage list --names 2>/dev/null)"})
             compadd -a repos

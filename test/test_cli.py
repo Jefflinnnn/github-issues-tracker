@@ -9,7 +9,7 @@ from conftest import reply
 from conftest import serve
 
 from triage import cli
-from triage.model import bedrock
+from triage.model import providers
 
 
 def test_version_exits_cleanly(capsys: pytest.CaptureFixture[str]) -> None:
@@ -25,7 +25,7 @@ def test_summary_then_rerun_then_list(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     model = FakeModel(replies=[reply("question"), reply("feature")])
-    monkeypatch.setattr(bedrock, "from_settings", lambda name: model)
+    monkeypatch.setattr(providers, "from_settings", lambda name: model)
     serve(
         monkeypatch,
         FakeGitHub(

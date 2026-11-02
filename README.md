@@ -6,15 +6,18 @@ it shows what needs you first. Run it again next week and it shows what
 changed since then.
 
 This version fetches and stores issues, flags them with plain code and
-tags each one with a model. Later pull requests add more model providers,
-an interactive summary and change notes between runs.
+tags each one with a model from Anthropic, an OpenAI-compatible endpoint
+or Amazon Bedrock. Later pull requests add finer triage of bugs and
+features, an interactive summary and change notes between runs.
 
 ## Requirements
 
 - Python 3.10 or newer
 - [uv](https://docs.astral.sh/uv/)
 - A GitHub account (for a read-only token)
-- An AWS key pair that can use Claude on Amazon Bedrock
+- A key for one model provider: an Anthropic API key, an OpenAI-compatible
+  endpoint (OpenAI, or a local server such as Ollama), or an AWS key pair
+  for Claude on Amazon Bedrock
 
 ## Install
 
@@ -59,15 +62,31 @@ folder:
 1. **GitHub token.** Setup checks it with GitHub before saving it.
 2. **Tab completion.** Setup shows the two lines it would add to `~/.zshrc`
    (or `~/.bashrc`) and asks before adding them.
-3. **Amazon Bedrock.** Your AWS access key ID and secret access key, the
-   region (default `us-west-2`), and a gateway URL if your organization
-   routes Bedrock through one. Leave the gateway empty to reach AWS
-   directly.
-4. **Model.** `haiku` (the default), `sonnet` or `opus`.
+3. **What do you have?** Pick one:
+   - an Anthropic API key
+   - an OpenAI API key
+   - AWS keys for Amazon Bedrock (then the region and an optional gateway)
+   - a local model, through Ollama or LM Studio (no key; setup fills in
+     Ollama's address)
+   - another OpenAI-compatible service, such as Groq, OpenRouter or vLLM
+     (its base URL and key)
+4. **Which model?** Setup suggests common models for what you picked, with
+   their prices: `haiku`, `sonnet` or `opus` for Claude; three current GPT
+   models for OpenAI; `qwen3:8b` or `llama3.1:8b` locally. "Another model"
+   lets you type any name; for a service triage has no price for, it also
+   asks the price.
 
-Secrets and the gateway URL aren't shown as you type. Setup then offers
-one tiny test request to Bedrock, which costs a few tokens and tells you
-whether the key pair and model work.
+Setup runs on a second screen, as `less` and `vim` do: each step gets a
+fresh page with your answers so far at the top, and when you finish (or
+press Esc) your terminal comes back as it was, with a summary of what was
+chosen. Menus move with the arrow keys and Enter, or take a number. Press
+Left to go back: in a menu it returns to the previous step, and at an empty prompt it
+returns to the menu above. Answers you've given are kept when you go back,
+and nothing is saved until the last step. (Where arrow keys don't work,
+type `<` to go back.) Secrets and the Bedrock gateway URL aren't shown as
+you type. Setup then offers one tiny
+test request, which costs a few tokens and tells you whether the key and
+model work.
 
 Running setup again is safe: pressing Enter keeps each saved value. To
 remove a saved gateway, type `-` at its prompt.
@@ -92,10 +111,56 @@ eval "$(triage completion zsh)"
 Completion runs the `triage` on your PATH, so install it with
 `uv tool install --editable .` first.
 
-## Models
+## Model providers
 
-triage sends each issue to Claude on Amazon Bedrock through Bedrock's
-Converse API, signing requests with your AWS key pair.
+`TRIAGE_PROVIDER` picks the provider: `anthropic`, `openai` or `bedrock`.
+Setup saves it. If it's empty, triage uses the first provider whose key is
+set, in that order. `--model` (or `TRIAGE_MODEL`) picks the model.
+
+triage keeps spending within the budget using each model's list price, so
+it needs a price for every model it uses.
+
+### Anthropic API
+
+Set `ANTHROPIC_API_KEY`; create a key at https://platform.claude.com.
+
+| Name | Model | $ per million tokens (in / out) |
+| --- | --- | --- |
+| `haiku` | `claude-haiku-4-5` | 1.00 / 5.00 |
+| `sonnet` | `claude-sonnet-5-5` | 2.00 / 10.00 |
+| `opus` | `claude-opus-5-5` | 4.00 / 20.00 |
+
+### OpenAI-compatible endpoint
+
+Any server that speaks OpenAI's chat completions API with function
+calling: OpenAI itself, or servers such as Ollama, vLLM or LM Studio. Set:
+
+- `OPENAI_BASE_URL`: empty means OpenAI (`https://api.openai.com/v1`); a
+  local Ollama is `http://localhost:11434/v1`.
+- `OPENAI_API_KEY`: required for OpenAI; a local server may need none.
+- `TRIAGE_MODEL`: the model name the server knows, e.g. `gpt-6-luna` or
+  `qwen3:8b`.
+- `TRIAGE_PRICE_PER_MTOK`: the model's input and output price in USD per
+  million tokens, e.g. `0.40,1.60`; `0,0` for a local model. triage knows
+  the prices of the OpenAI models setup suggests, so those need none:
+
+  | Model | $ per million tokens (in / out) |
+  | --- | --- |
+  | `gpt-6-luna` | 0.10 / 0.50 |
+  | `gpt-6.1-terra` | 1.00 / 5.00 |
+  | `gpt-6.1-sol` | 2.00 / 10.00 |
+
+  For any other model or server, triage refuses to run without a price.
+
+To try it without any key, install [Ollama](https://ollama.com), run
+`ollama pull qwen3:8b`, and pick "A local model" in setup.
+
+### Amazon Bedrock
+
+triage calls Bedrock's Converse API, signing requests with an AWS key
+pair. Set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_REGION`
+(default `us-west-2`). Set `BEDROCK_ENDPOINT_URL` only if your
+organization routes Bedrock through a gateway; empty reaches AWS directly.
 
 | Name | Bedrock model ID | $ per million tokens (in / out) |
 | --- | --- | --- |
@@ -103,10 +168,17 @@ Converse API, signing requests with your AWS key pair.
 | `sonnet` | `us.anthropic.claude-sonnet-5-5` | 2.20 / 11.00 |
 | `opus` | `us.anthropic.claude-opus-5-5` | 4.40 / 22.00 |
 
-triage uses these list prices to stay within the budget. A gateway may
-bill its own rates, which triage can't see. If your shell exports
-`AWS_BEARER_TOKEN_BEDROCK`, triage ignores it and signs with the key pair,
-so that token never goes to a gateway.
+A gateway may bill its own rates, which triage can't see. If your shell
+exports `AWS_BEARER_TOKEN_BEDROCK`, triage ignores it and signs with the
+key pair, so that token never goes to a gateway.
+
+### How replies come back
+
+Every provider gets the same prompt and returns the tag through a
+function (tool) call, so the reply is structured data. The function is
+offered, not forced: Claude models such as Sonnet 5.5 refuse a forced call,
+and the prompt tells the model to use it. A reply that skips it, or doesn't
+fit the tags, is retried once, then the issue is skipped.
 
 ## Usage
 
@@ -161,6 +233,7 @@ Options:
 | `--limit N` (summary) | 0 (all) | First run only: fetch the N most recently updated open issues |
 | `--model NAME` (summary) | `TRIAGE_MODEL`, then `haiku` | `haiku`, `sonnet` or `opus` |
 | `--budget-usd USD` (summary) | 0.50 | Most the model may spend this run |
+| `--workers N` (summary) | 4 | Model requests sent at once, 1 to 64 |
 | `-v` | off | Show debug logs |
 
 ### Limits
@@ -170,11 +243,17 @@ Options:
 - triage keeps each issue's 10 latest comments; the stale check and the
   model see only those. It sends at most 4,000 characters of the opening
   post and 800 of each comment.
-- triage adds up what each model request costs from the tokens Bedrock
-  reports. Before each request it stops if the budget is spent, or if a
-  request as expensive as the priciest so far would cross it. Issues left
-  over are tagged first on the next run. The first request always goes
-  out, so a run can end over budget by at most one request.
+- triage sends 4 model requests at once; `--workers N` changes that, from
+  1 to 64. Most of a run is spent waiting on the API, so more workers
+  finish sooner until the provider answers with rate-limit errors; lower
+  `--workers` if it does.
+- triage adds up what each model request costs from the tokens the
+  provider reports. The first request goes out alone, to learn what a
+  request costs. After that, a request is sent only if the spend so far,
+  plus every request in flight and this one each counted as costing as
+  much as the priciest so far, stays within `--budget-usd`. So a run can
+  end over budget by at most about one request. Issues left over are
+  tagged first on the next run.
 - A reply that doesn't fit the tags is retried once, telling the model
   what was wrong. If the retry fails too, the issue stays untagged and the
   summary names it.

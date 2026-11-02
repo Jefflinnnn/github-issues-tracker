@@ -5,7 +5,9 @@ description = "Summarize a GitHub repository's open issues from the terminal."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "anthropic>=2.3",
     "boto3>=1.35",
+    "openai>=1.50",
 ]
 
 [project.scripts]

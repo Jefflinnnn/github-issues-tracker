@@ -66,6 +66,42 @@ class ProviderError(RuntimeError):
     """A failure that stops the run, such as a rejected key."""
 
 
+@dataclasses.dataclass(frozen=True)
+class Model:
+    """A model a provider offers by a short name.
+
+    Attributes:
+        id: The model ID the API expects.
+        price: Its list price, for the budget.
+    """
+
+    id: str
+    price: "pricing.Price"
+
+
+def pick_model(models: Mapping[str, Model], name: str, default: str) -> Model:
+    """Looks up a model by its short name.
+
+    Args:
+        models: The provider's models by short name, e.g. ``haiku``.
+        name: The name asked for; empty picks ``default``.
+        default: The name to use when none is given.
+
+    Returns:
+        The model.
+
+    Raises:
+        ProviderError: The name isn't one of ``models``.
+    """
+    key = (name or default).lower()
+    if key not in models:
+        raise ProviderError(
+            f"Unknown model {key!r}. Pick {', '.join(models)} with --model "
+            "or TRIAGE_MODEL."
+        )
+    return models[key]
+
+
 class Provider(Protocol):
     """A model API the classifier can send issues to.
 
