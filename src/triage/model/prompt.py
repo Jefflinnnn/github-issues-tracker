@@ -12,7 +12,7 @@ from typing import Any
 from triage.model import provider
 from triage.pipeline import transform
 
-VERSION = "3"
+VERSION = "4"
 # Room for a short reply plus the thinking some models, such as Sonnet and
 # Opus 5.5, do before answering; replies are billed by what they use.
 MAX_OUTPUT_TOKENS = 1_024
@@ -36,6 +36,7 @@ class Tag(str, enum.Enum):
     QUESTION = "question"
     DOCS = "docs"
     OTHER = "other"
+    SPAM = "spam"
 
 
 class Level(str, enum.Enum):
@@ -124,7 +125,8 @@ DEFINITIONS = {
     Tag.FEATURE: "asks for new behavior or a change",
     Tag.QUESTION: "asks how to do something; nothing is wrong",
     Tag.DOCS: "documentation is missing, wrong or unclear",
-    Tag.OTHER: "a discussion, tracker, announcement or spam",
+    Tag.OTHER: "a discussion, tracker, roadmap or announcement",
+    Tag.SPAM: "spam, gibberish or off-topic noise with nothing to act on",
 }
 
 SYSTEM = (

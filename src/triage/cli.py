@@ -127,7 +127,15 @@ def _summary(
     if log.printed:
         print(file=sys.stderr)
     width = shutil.get_terminal_size().columns
-    sys.stdout.write(report.summary(result, width))
+    sys.stdout.write(
+        report.summary(
+            result,
+            width,
+            report.Style.for_stream(sys.stdout),
+            hot=args.hot,
+            stale=args.stale,
+        )
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -203,6 +211,16 @@ def _build_parser() -> argparse.ArgumentParser:
             f"{classifier.MAX_WORKERS}; lower it if the provider answers "
             f"with rate-limit errors (default: {classifier.DEFAULT_WORKERS})"
         ),
+    )
+    summary.add_argument(
+        "--hot",
+        action="store_true",
+        help="list hot issues, not just count them",
+    )
+    summary.add_argument(
+        "--stale",
+        action="store_true",
+        help="list stale issues, not just count them",
     )
     summary.add_argument(
         "--budget-usd",
