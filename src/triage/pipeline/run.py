@@ -85,7 +85,9 @@ def run(
     stored issues GitHub no longer lists as open are marked closed.
 
     The model then tags open issues that are new, changed or tagged under
-    another model or prompt version, most recently updated first.
+    another model or prompt version, most recently updated first. With a
+    limit, it looks only at the issues this run fetched, so a small limit
+    means a small run; older untagged issues wait for a run without one.
 
     Args:
         repo: The repository.
@@ -165,8 +167,14 @@ def run(
     stored = load.open_issues(connection, name)
 
     current = load.current_tags(connection, name, model.model, prompt.VERSION)
+    fetched_ids = {node["id"] for node in fetched_nodes}
     pending = sorted(
-        (issue for issue in stored if issue.id not in current),
+        (
+            issue
+            for issue in stored
+            if issue.id not in current
+            and (not limit or issue.id in fetched_ids)
+        ),
         key=lambda issue: issue.updated_at,
         reverse=True,
     )

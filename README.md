@@ -207,7 +207,8 @@ triage summary owner/name --limit 100
 
 triage then fetches the 100 most recently updated open issues, plus
 whatever changed since the last run, so issues already stored never go
-stale. You can change the limit from run to run. A later run without
+stale. The model tags only those issues, so a small limit means a quick,
+cheap run. You can change the limit from run to run. A later run without
 `--limit` notices that issues were left out and fetches every open issue
 once to fill them in. Whenever a run sees every open issue, issues that
 GitHub no longer lists as open are marked closed.

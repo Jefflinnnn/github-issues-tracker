@@ -144,6 +144,40 @@ def test_limit_on_a_later_run_also_fetches_what_changed(
     assert "Run: newest 1 of 2 open + changes" in out
 
 
+def test_limit_also_caps_what_the_model_tags(
+    isolated: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    model = FakeModel()
+    monkeypatch.setattr(providers, "from_settings", lambda name: model)
+    # The budget covers one request, so #2 and #3 stay untagged.
+    serve(
+        monkeypatch,
+        FakeGitHub(
+            [[issue(n, updated_days_ago=n) for n in (1, 2, 3)]], total_open=3
+        ),
+    )
+    assert cli.main(["summary", "owner/repo", "--budget-usd", "0.002"]) == 0
+    capsys.readouterr()
+    assert len(model.requests) == 1
+
+    # --limit 1 fetches only #3, so #2 waits even though it is untagged.
+    serve(
+        monkeypatch,
+        FakeGitHub(
+            [[issue(3, updated_days_ago=3)]], total_open=3, changed=[[]]
+        ),
+    )
+    assert cli.main(["summary", "owner/repo", "--limit", "1"]) == 0
+    out = capsys.readouterr().out
+
+    assert len(model.requests) == 2
+    assert "Title: Issue 3" in model.requests[-1].user
+    assert "untagged 1" in out
+    assert "· 1 tagged ·" in out
+
+
 def test_demand_raises_a_feature_to_must_have(
     isolated: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
