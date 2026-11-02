@@ -85,7 +85,8 @@ def run(
     stored issues GitHub no longer lists as open are marked closed.
 
     The model then tags open issues that are new, changed or tagged under
-    another model or prompt version, most recently updated first. With a
+    another model or prompt version: hot issues first, busiest first, then
+    the rest, most recently updated first. With a
     limit, it looks only at the issues this run fetched, so a small limit
     means a small run; older untagged issues wait for a run without one.
 
@@ -168,16 +169,13 @@ def run(
 
     current = load.current_tags(connection, name, model.model, prompt.VERSION)
     fetched_ids = {node["id"] for node in fetched_nodes}
-    pending = sorted(
-        (
-            issue
-            for issue in stored
-            if issue.id not in current
-            and (not limit or issue.id in fetched_ids)
-        ),
-        key=lambda issue: issue.updated_at,
-        reverse=True,
-    )
+    flagged = transform.flag_issues(stored, now)
+    pending = [
+        item.issue
+        for item in sorted(flagged, key=_tagging_order)
+        if item.issue.id not in current
+        and (not limit or item.issue.id in fetched_ids)
+    ]
 
     def tagging(done: int, total: int) -> None:
         status.bar("Tagging", done, total)
@@ -207,12 +205,26 @@ def run(
         limit=limit,
         fetched=len(issues),
         open_on_github=extracted.total_open,
-        flagged=transform.flag_issues(stored, now),
+        flagged=flagged,
         tags=tags,
         raised=raised,
         model=model.model,
         outcome=outcome,
         budget_usd=budget_usd,
+    )
+
+
+def _tagging_order(item: transform.FlaggedIssue) -> tuple[bool, float, float]:
+    """Sorts hot issues first, busiest first, then the rest, newest first.
+
+    The budget may run out before every issue is tagged, so the issues a
+    maintainer most needs to see go to the model first.
+    """
+    hot = transform.Flag.HOT in item.flags
+    return (
+        not hot,
+        -item.engagement if hot else 0,
+        -item.issue.updated_at.timestamp(),
     )
 
 

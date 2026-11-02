@@ -222,12 +222,14 @@ core:
 | `feature` | Asks for new behavior or a change |
 | `question` | Asks how to do something; nothing is wrong |
 | `docs` | Documentation is missing, wrong or unclear |
-| `other` | A discussion, tracker, announcement or spam |
+| `other` | A discussion, tracker, roadmap or announcement |
+| `spam` | Spam, gibberish or off-topic noise; counted, never listed |
 
 Bugs and features get a second level:
 
 - **Bugs**: severity (how bad it is when it happens) and priority (how
-  soon to fix it), each `high` or `low`, shown as `bug high/low`.
+  soon to fix it), each `high` or `low`. The summary calls a high
+  severity `severe` and a high priority `urgent`.
 - **Features**: `must-have`, `should-have` or `could-have`.
 
 The model judges these from evidence in the issue: the report itself,
@@ -245,33 +247,118 @@ model's choice, and it's recomputed on every run, so a request that picks
 up support rises without being sent to the model again. The summary marks
 raised features with ↑.
 
-The model reads the title, labels, opening post and the 10 latest
-comments, and gives a one-sentence reason with its tags. An issue goes
-back to the model only when it changes, so a rerun costs little. The
-summary counts issues per tag and lists them in groups, up to 10 per
-group:
+Any issue may also get one subtag, for what is happening with it now. The
+model judges it from the latest comments:
 
-- **Bugs to fix first**: high-priority bugs, high severity first.
-- **Most-wanted features**: must-have features, by demand.
-- **Hot**: among the busiest tenth of open issues by reactions plus
-  comments, with at least 3.
-- **Stale**: no comment from a person in 60 days. Bot comments and label
-  edits don't count.
+| Subtag | Meaning |
+| --- | --- |
+| `fix-failed` | A fix was released, and someone says the problem still happens |
+| `fix-released` | A fix or the feature was released; nobody has confirmed it yet |
+| `fix-confirmed` | A fix or the feature was released, and someone says it works |
+| `fix-in-progress` | A pull request is open, or a fix is merged but not released |
+| `needs-info` | Someone asked the opener for details, with no answer since |
+| `duplicate` | Someone pointed to another issue that covers the same thing |
+
+Most issues have none.
+
+The model reads the title, labels, opening post and the 10 latest
+comments. Along with its tags, it writes a one-sentence summary of what
+the issue is about and a one-sentence reason for the tags. An issue goes
+back to the model only when it changes, so a rerun costs little. Hot
+issues go to the model first, busiest first, then the rest, newest first,
+so if the budget runs out, what's left untagged is the least pressing.
 
 While it runs, triage shows its progress on one line of the terminal: a
 bar for fetching, then one for tagging. The line disappears when the run
-ends, and the summary starts with three header lines:
+ends, and the summary follows:
 
 ```text
-owner/name · 150 open · 12 hot · 31 stale
-Tags: bug 41 (6 high priority) · feature 52 (4 must-have) · question 30 · docs 9 · other 6
-Run: first run, 150 fetched · 138 tagged · $0.29 of $0.30 · 12 left for next run
+astral-sh/uv
+941 open · scanned the newest 15 (2%) · 9 tagged (60%)
+
+                count   breakdown
+  bug               4   2 urgent · 3 severe
+  feature           4   1 must · 1 should · 2 could
+  question          1
+  ───────────────────
+  not yet tagged    6
+
+          TAGS                  ACTIVITY  IDLE
+FIX DIDN'T WORK (1)  a released fix, still reported
+  #16726  bug: severe, urgent         39    9d  Managed Python is killed by Gatekeeper on macOS
+
+No urgent bugs to fix · 1 urgent with a released fix · 1 severe, not urgent
+
+MOST-WANTED FEATURES (1)  must-have, most demand first
+  #6830   must-have                   38   18d  Named lockfiles for several resol… [fix-in-progress]
+
+READY TO CLOSE (3)  fix confirmed, duplicate, or no answer in 30 days
+  #5731   should-have                 14   81d  Cache size limit with automatic pru… [fix-confirmed]
+  #10219  could-have                  33   63d  JSON output for the tool list command [duplicate]
+  #12739  question                    34   54d  Why does a new venv see global package… [needs-info]
+
+ASK TO CONFIRM (1)  fix released, nobody has confirmed it
+  #5190   could-have                  35   45d  Lock build dependencies of sdists
+
+2 hot · --hot to list
+2 waiting on a fix or the reporter
+This run tagged 9 · $0.01 of $0.50 · 6 queued for next run, hot first
 ```
 
-The Run line says what this run fetched, how many issues the model tagged,
-what that cost against `--budget-usd`, and how many issues the budget left
-for the next run. It names any issues whose replies were unusable twice.
-Warnings print above the summary, separated by a blank line.
+Read it top down:
+
+- **Scope** comes first: how many issues are open, how many triage scanned
+  when `--limit` left some out, and how many of those are tagged. Every
+  count below covers the scanned issues.
+- **The tag table** counts issues per main tag; its rows add up to the
+  issues scanned. The breakdown splits bugs into urgent (high priority)
+  and severe (high severity), and features into all three MoSCoW values,
+  so you can see whether the model puts everything in one bucket. Issues
+  not tagged yet sit dimmed below the rule. Spam is counted here and listed
+  nowhere.
+- **The groups** list the issues that need a decision, up to 10 each,
+  ordered by what it costs to leave an issue alone. An issue fits several
+  groups but is listed once, in the first one; later headings say how many
+  are listed above. Empty groups are left out.
+- **The footer** holds backlog counts and the run's cost, one dim line
+  each: hot and stale issues (list them with `--hot` and `--stale`),
+  issues waiting on a fix or the reporter, what the model tagged and spent
+  against `--budget-usd`, and how many issues the budget queued for the
+  next run, hot ones first.
+
+The groups:
+
+- **Fix didn't work** (in red): `fix-failed` issues, busiest first.
+- **Bugs to fix first**: urgent bugs, severe first, then by activity, then
+  longest idle. Bugs with a subtag are left out, since a fix, the opener
+  or another issue already holds them. A note counts the severe bugs left
+  out because they aren't urgent. When no bug is left, one line says so
+  and where the urgent bugs went.
+- **Most-wanted features**: must-have features, by demand, except those
+  already released or duplicated.
+- **Ready to close**: `fix-confirmed` and `duplicate` issues, and
+  `needs-info` issues with no answer in 30 days, idle longest first.
+- **Ask to confirm**: `fix-released` issues nobody has confirmed yet.
+- **Hot**, with `--hot`: among the busiest tenth of open issues by
+  reactions plus comments, with at least 3.
+- **Stale**, with `--stale`: no comment from a person in 60 days. Bot
+  comments and label edits don't count. A partial scan leaves staleness
+  out, since the newest issues are rarely stale.
+
+Each row shows the issue number, its tags in words, its activity
+(reactions plus comments), days since a person last commented, and the
+model's summary. `bug: severe, urgent` means high severity and high
+priority, and a plain `bug` means neither; `must-have ↑` means demand
+raised a feature's priority. An issue the model hasn't tagged yet shows
+its title. A row ends with its subtag, except in groups where every row
+has the same one. The reason for the tags is stored, not shown. Rows are
+cut to the terminal's width, at most 100 characters.
+
+On a terminal, triage dims labels, marks what needs action (urgent bugs,
+must-have features, Fix didn't work) in red, and makes issue numbers
+links you can click, in terminals that support them. Set `NO_COLOR` to
+turn color off. Piped or redirected, the summary is plain text. Warnings
+print above the summary, separated by a blank line.
 
 Show the repositories you've summarized:
 
@@ -287,6 +374,8 @@ Options:
 | `--model NAME` (summary) | `TRIAGE_MODEL`, then `haiku` | `haiku`, `sonnet` or `opus` |
 | `--budget-usd USD` (summary) | 0.50 | Most the model may spend this run |
 | `--workers N` (summary) | 4 | Model requests sent at once, 1 to 64 |
+| `--hot` (summary) | off | List hot issues, not just count them |
+| `--stale` (summary) | off | List stale issues, not just count them |
 | `-v` | off | Show debug logs, such as each fetch and unusable reply |
 
 ### Limits

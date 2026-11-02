@@ -33,3 +33,12 @@ def test_issue_is_fenced_cut_and_marks_who_wrote_what() -> None:
         "Comment by a maintainer:",
         "Comment by bot:",
     ]
+
+
+def test_every_subtag_is_defined_and_in_the_schema() -> None:
+    for subtag in prompt.Subtag:
+        assert f"- {subtag.value}: " in prompt.SYSTEM
+    assert prompt.SCHEMA["properties"]["subtag"]["enum"] == [
+        subtag.value for subtag in prompt.Subtag
+    ]
+    assert "subtag" not in prompt.SCHEMA["required"]

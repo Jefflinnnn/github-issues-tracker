@@ -193,9 +193,10 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
     """Checks a reply and returns what the model decided.
 
     A bug must come with a severity and a priority, and a feature with a
-    MoSCoW priority; those fields are dropped for other tags. A rationale
-    longer than allowed is cut rather than retried: the tags are what
-    matter, and a retry costs a request.
+    MoSCoW priority; those fields are dropped for other tags. A subtag is
+    optional for any tag. A summary or rationale longer than allowed is
+    cut rather than retried: the tags are what matter, and a retry costs a
+    request.
 
     Args:
         reply: The provider's reply.
@@ -205,7 +206,7 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
 
     Raises:
         InvalidReplyError: The reply is missing, has an unknown value, lacks
-            a field its tag needs, or has no rationale.
+            a field its tag needs, or has no summary or rationale.
     """
     if reply.data is None:
         raise InvalidReplyError(reply.problem or "no reply")
@@ -215,18 +216,40 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
     if not isinstance(rationale, str) or not rationale.strip():
         raise InvalidReplyError("the rationale is missing")
     rationale = rationale.strip()[: prompt.RATIONALE_MAX_CHARS]
+    summary = data.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise InvalidReplyError("the summary is missing")
+    summary = _cut_at_word(summary.strip(), prompt.SUMMARY_HARD_MAX_CHARS)
+    subtag = (
+        _enum(prompt.Subtag, data, "subtag")
+        if data.get("subtag") not in (None, "", "none")
+        else None
+    )
     if tag is prompt.Tag.BUG:
         return prompt.Tagging(
             tag,
             rationale,
+            summary,
             severity=_enum(prompt.Level, data, "severity"),
             priority=_enum(prompt.Level, data, "priority"),
+            subtag=subtag,
         )
     if tag is prompt.Tag.FEATURE:
         return prompt.Tagging(
-            tag, rationale, moscow=_enum(prompt.Moscow, data, "moscow")
+            tag,
+            rationale,
+            summary,
+            moscow=_enum(prompt.Moscow, data, "moscow"),
+            subtag=subtag,
         )
-    return prompt.Tagging(tag, rationale)
+    return prompt.Tagging(tag, rationale, summary, subtag=subtag)
+
+
+def _cut_at_word(text: str, limit: int) -> str:
+    """Cuts text to at most ``limit`` characters, at a word, marking the cut."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
 
 
 _EnumT = TypeVar("_EnumT", bound=enum.Enum)

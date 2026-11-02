@@ -20,7 +20,7 @@ from triage.pipeline import transform
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE repos (
@@ -88,12 +88,16 @@ CREATE TABLE tags (
     tagged_at         TEXT NOT NULL,
     tag               TEXT NOT NULL,
     rationale         TEXT NOT NULL,
+    -- What the issue is about, in one sentence.
+    summary           TEXT NOT NULL,
     -- high or low; bugs only.
     severity          TEXT,
     priority          TEXT,
     -- must-have, should-have or could-have, as the model chose it (before
     -- the demand floor); features only.
-    moscow            TEXT
+    moscow            TEXT,
+    -- What is happening with the issue now, e.g. fix-failed; any tag.
+    subtag            TEXT
 );
 
 CREATE INDEX tags_by_issue ON tags(issue_id);
@@ -354,8 +358,8 @@ def save_tag(
             """
             INSERT INTO tags (issue_id, issue_updated_at, model,
                               prompt_version, tagged_at, tag, rationale,
-                              severity, priority, moscow)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              summary, severity, priority, moscow, subtag)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 issue.id,
@@ -365,9 +369,11 @@ def save_tag(
                 _iso(datetime.datetime.now(datetime.timezone.utc)),
                 tagging.tag.value,
                 tagging.rationale,
+                tagging.summary,
                 _value(tagging.severity),
                 _value(tagging.priority),
                 _value(tagging.moscow),
+                _value(tagging.subtag),
             ),
         )
 
@@ -394,8 +400,9 @@ def current_tags(
     """
     rows = connection.execute(
         """
-        SELECT tags.issue_id, tags.tag, tags.rationale, tags.severity,
-               tags.priority, tags.moscow
+        SELECT tags.issue_id, tags.tag, tags.rationale, tags.summary,
+               tags.severity,
+               tags.priority, tags.moscow, tags.subtag
         FROM tags
         JOIN issues ON issues.id = tags.issue_id
         JOIN repos ON repos.id = issues.repo_id
@@ -410,11 +417,22 @@ def current_tags(
         issue_id: prompt.Tagging(
             tag=prompt.Tag(tag),
             rationale=rationale,
+            summary=summary,
             severity=prompt.Level(severity) if severity else None,
             priority=prompt.Level(priority) if priority else None,
             moscow=prompt.Moscow(moscow) if moscow else None,
+            subtag=prompt.Subtag(subtag) if subtag else None,
         )
-        for issue_id, tag, rationale, severity, priority, moscow in rows
+        for (
+            issue_id,
+            tag,
+            rationale,
+            summary,
+            severity,
+            priority,
+            moscow,
+            subtag,
+        ) in rows
     }
 
 
