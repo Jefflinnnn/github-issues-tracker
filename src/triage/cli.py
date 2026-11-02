@@ -16,11 +16,13 @@ from collections.abc import Sequence
 
 from triage import completion
 from triage import config
+from triage import menu
 from triage import repo_ref
 from triage import report
 from triage import setup
-from triage.model import bedrock
+from triage.model import classifier
 from triage.model import provider
+from triage.model import providers
 from triage.pipeline import extract
 from triage.pipeline import load
 from triage.pipeline import run
@@ -66,7 +68,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         try:
             setup.run()
-        except (KeyboardInterrupt, EOFError):
+        except (KeyboardInterrupt, EOFError, menu.CancelledError):
             print("\nSetup stopped; nothing was saved.", file=sys.stderr)
             return 1
         return 0
@@ -95,7 +97,7 @@ def _summary(args: argparse.Namespace, connection: sqlite3.Connection) -> None:
     repo = repo_ref.parse(args.repo)
     token = config.github_token()
     # Settings are checked before fetching, so a missing key fails fast.
-    model = bedrock.from_settings(args.model)
+    model = providers.from_settings(args.model)
     result = run.run(
         repo=repo,
         limit=args.limit,
@@ -103,6 +105,7 @@ def _summary(args: argparse.Namespace, connection: sqlite3.Connection) -> None:
         connection=connection,
         model=model,
         budget_usd=args.budget_usd,
+        workers=args.workers,
         now=datetime.datetime.now(datetime.timezone.utc),
     )
     width = shutil.get_terminal_size().columns
@@ -163,11 +166,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     summary.add_argument(
         "--model",
-        choices=sorted(bedrock.MODELS),
         default="",
+        metavar="NAME",
         help=(
-            "Claude model to tag with (default: TRIAGE_MODEL, then "
-            f"{bedrock.DEFAULT_MODEL})"
+            "model to tag with: haiku, sonnet or opus for Anthropic and "
+            "Bedrock, or the model name for an OpenAI-compatible endpoint "
+            "(default: TRIAGE_MODEL, then haiku)"
+        ),
+    )
+    summary.add_argument(
+        "--workers",
+        type=_worker_count,
+        default=classifier.DEFAULT_WORKERS,
+        metavar="N",
+        help=(
+            "model requests sent at once, 1 to "
+            f"{classifier.MAX_WORKERS}; lower it if the provider answers "
+            f"with rate-limit errors (default: {classifier.DEFAULT_WORKERS})"
         ),
     )
     summary.add_argument(
@@ -216,6 +231,16 @@ def _non_negative_int(text: str) -> int:
         ) from None
     if value < 0:
         raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
+    return value
+
+
+def _worker_count(text: str) -> int:
+    """Parses a worker count from 1 to MAX_WORKERS, for argparse."""
+    value = _non_negative_int(text)
+    if not 1 <= value <= classifier.MAX_WORKERS:
+        raise argparse.ArgumentTypeError(
+            f"must be 1 to {classifier.MAX_WORKERS}, got {value}"
+        )
     return value
 
 

@@ -47,7 +47,7 @@ def _client_error(status: int, message: str) -> botocore.exceptions.ClientError:
     )
 
 
-def test_forces_the_tool_and_returns_its_input() -> None:
+def test_offers_the_tool_and_returns_its_input() -> None:
     call = {
         "toolUse": {
             "toolUseId": "t1",
@@ -61,9 +61,8 @@ def test_forces_the_tool_and_returns_its_input() -> None:
 
     assert reply.data == {"tag": "bug", "rationale": "Crash."}
     assert reply.usage == provider.Usage(900, 40)
-    assert client.kwargs["toolConfig"]["toolChoice"] == {
-        "tool": {"name": bedrock.TOOL_NAME}
-    }
+    # Offered, not forced: Sonnet 5.5 refuses a forced tool call.
+    assert client.kwargs["toolConfig"]["toolChoice"] == {"auto": {}}
     assert client.kwargs["modelId"] == bedrock.MODELS["haiku"].id
 
 
@@ -119,46 +118,3 @@ def test_missing_keys_are_named(
 
     with pytest.raises(provider.ProviderError, match="AWS_ACCESS_KEY_ID"):
         bedrock.from_settings()
-
-
-def test_falls_back_when_the_model_refuses_a_forced_tool() -> None:
-    call = {
-        "toolUse": {
-            "name": bedrock.TOOL_NAME,
-            "input": {"tag": "docs", "rationale": "Typo."},
-        }
-    }
-
-    class RefusesForcedTool(FakeClient):
-        def __init__(self) -> None:
-            super().__init__()
-            self.choices: list[dict[str, Any]] = []
-
-        def converse(self, **kwargs: Any) -> Any:
-            self.choices.append(kwargs["toolConfig"]["toolChoice"])
-            if "tool" in kwargs["toolConfig"]["toolChoice"]:
-                raise botocore.exceptions.ClientError(
-                    {
-                        "Error": {
-                            "Code": "ValidationException",
-                            "Message": 'tool_choice: type "tool" and "any" '
-                            "are not supported for this model.",
-                        },
-                        "ResponseMetadata": {"HTTPStatusCode": 400},
-                    },
-                    "Converse",
-                )
-            return _response("tool_use", [{"reasoningContent": {}}, call])
-
-    client = RefusesForcedTool()
-    model = bedrock.BedrockProvider(bedrock.MODELS["sonnet"], client)
-    request = prompt.request(transform.to_issue(issue(1)))
-
-    assert model.classify(request).data == {"tag": "docs", "rationale": "Typo."}
-    model.classify(request)
-    # Forced once, refused, then offered for this and every later request.
-    assert client.choices == [
-        {"tool": {"name": bedrock.TOOL_NAME}},
-        {"auto": {}},
-        {"auto": {}},
-    ]

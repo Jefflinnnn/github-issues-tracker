@@ -59,6 +59,7 @@ def run(
     model: provider.Provider,
     budget_usd: float,
     now: datetime.datetime,
+    workers: int = classifier.DEFAULT_WORKERS,
 ) -> RunResult:
     """Fetches what's new for a repository, stores it and tags its issues.
 
@@ -76,6 +77,7 @@ def run(
         model: The provider that tags issues.
         budget_usd: Most the model step may spend this run.
         now: The current time, timezone-aware.
+        workers: Most model requests in flight at once.
 
     Returns:
         The run's result.
@@ -116,7 +118,7 @@ def run(
             connection, issue, tag.value, rationale, model.model, prompt.VERSION
         )
 
-    outcome = classifier.classify(pending, model, budget_usd, save)
+    outcome = classifier.classify(pending, model, budget_usd, save, workers)
     load.finish_run(
         connection, run_id, model.model, outcome.tagged, outcome.spent_usd
     )
