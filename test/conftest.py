@@ -128,6 +128,14 @@ class FakeGitHub:
         }
 
 
+@pytest.fixture(autouse=True)
+def no_user_settings(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Points the per-user settings file at an empty folder for every test."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+
 @pytest.fixture
 def isolated(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch

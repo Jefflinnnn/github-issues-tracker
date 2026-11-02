@@ -46,26 +46,56 @@ access possible: read-only access to public repositories, nothing else.
 Avoid reusing `gh auth token`: it usually carries far more access than this
 tool needs.
 
-Copy `.env.example` to `.env` and paste the token after `GITHUB_TOKEN=` in
-an editor, not with `echo`, so it stays out of your shell history:
+## Run setup
 
 ```bash
-cp .env.example .env
+triage setup
 ```
 
-Git ignores `.env`. triage reads it from the folder you run it in, so run
-`triage` from this folder or export `GITHUB_TOKEN` in your shell instead.
+Setup asks for each setting and saves the answers to
+`~/.config/triage/.env`, which only you can read, so triage works from any
+folder:
 
-## Set up the model
+1. **GitHub token.** Setup checks it with GitHub before saving it.
+2. **Tab completion.** Setup shows the two lines it would add to `~/.zshrc`
+   (or `~/.bashrc`) and asks before adding them.
+3. **Amazon Bedrock.** Your AWS access key ID and secret access key, the
+   region (default `us-west-2`), and a gateway URL if your organization
+   routes Bedrock through one. Leave the gateway empty to reach AWS
+   directly.
+4. **Model.** `haiku` (the default), `sonnet` or `opus`.
+
+Secrets and the gateway URL aren't shown as you type. Setup then offers
+one tiny test request to Bedrock, which costs a few tokens and tells you
+whether the key pair and model work.
+
+Running setup again is safe: pressing Enter keeps each saved value. To
+remove a saved gateway, type `-` at its prompt.
+
+To set values by hand instead, copy `.env.example` to `.env` in the folder
+you run triage from and fill it in with an editor, not with `echo`, so the
+values stay out of your shell history. A `.env` in the current folder wins
+over setup's file; your shell's environment comes last. Git ignores `.env`.
+
+## Tab completion
+
+With completion on, press Tab after `triage ` to complete a command, after
+`triage summary ` to complete a repository you've summarized before, and
+after `--model ` to complete a model name. It works in zsh and bash. Setup
+offers to turn it on; to do it yourself, add this line to `~/.zshrc` (or
+`~/.bashrc` with `bash`) and open a new terminal:
+
+```bash
+eval "$(triage completion zsh)"
+```
+
+Completion runs the `triage` on your PATH, so install it with
+`uv tool install --editable .` first.
+
+## Models
 
 triage sends each issue to Claude on Amazon Bedrock through Bedrock's
-Converse API, signing requests with an AWS key pair. In `.env`, set:
-
-- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
-- `AWS_REGION`; the default is `us-west-2`.
-- `BEDROCK_ENDPOINT_URL`, only if your organization routes Bedrock through
-  a gateway. Empty sends requests to AWS directly.
-- `TRIAGE_MODEL`: `haiku` (the default), `sonnet` or `opus`.
+Converse API, signing requests with your AWS key pair.
 
 | Name | Bedrock model ID | $ per million tokens (in / out) |
 | --- | --- | --- |
