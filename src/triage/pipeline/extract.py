@@ -98,6 +98,9 @@ query($owner: String!, $name: String!, $pageSize: Int!, $comments: Int!,
 )
 
 
+VIEWER_QUERY = "query { viewer { login } }"
+
+
 class GitHubError(RuntimeError):
     """Raised when GitHub can't return the requested data."""
 
@@ -206,6 +209,25 @@ def _fetch_pages(
         nodes=list(nodes.values()),
         total_open=repository["openIssues"]["totalCount"],
     )
+
+
+def check_token(token: str) -> str:
+    """Confirms a token works with one cheap request.
+
+    Args:
+        token: The GitHub token to check.
+
+    Returns:
+        The login of the account the token belongs to.
+
+    Raises:
+        GitHubError: GitHub rejected the token or couldn't be reached.
+    """
+    payload = post_graphql(VIEWER_QUERY, {}, token)
+    if payload.get("errors"):
+        raise GitHubError(f"GitHub returned errors: {payload['errors']}")
+    login: str = payload["data"]["viewer"]["login"]
+    return login
 
 
 def post_graphql(

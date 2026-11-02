@@ -14,15 +14,18 @@ import dataclasses
 import logging
 import os
 import pathlib
+from typing import TYPE_CHECKING
 from typing import Any
-
-import boto3
-import botocore.config
-import botocore.exceptions
 
 from triage import config
 from triage.model import pricing
 from triage.model import provider
+
+if TYPE_CHECKING:
+    import botocore.exceptions
+
+# boto3 is imported inside the functions that use it: it takes about a
+# tenth of a second to load, and Tab completion runs triage on every press.
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +104,30 @@ class BedrockProvider:
         self._client = client
         self._force_tool = True
 
+    def check(self) -> None:
+        """Sends one tiny request to confirm the key pair and model work.
+
+        It costs a few tokens: a one-line prompt and a reply of at most 8.
+
+        Raises:
+            ProviderError: The request failed; the message says why.
+        """
+        import botocore.exceptions
+
+        try:
+            self._client.converse(
+                modelId=self.model,
+                messages=[{"role": "user", "content": [{"text": "Say OK."}]}],
+                inferenceConfig={"maxTokens": 8},
+            )
+        except botocore.exceptions.ClientError as error:
+            raise _client_error(error, self.model) from error
+        except botocore.exceptions.BotoCoreError as error:
+            raise provider.ProviderError(
+                f"Couldn't reach Bedrock ({error}). Check your connection "
+                "and BEDROCK_ENDPOINT_URL."
+            ) from error
+
     def classify(self, request: provider.Request) -> provider.Reply:
         """Sends one request and returns the tool call's input.
 
@@ -113,6 +140,8 @@ class BedrockProvider:
         Raises:
             ProviderError: The request failed before the model answered.
         """
+        import botocore.exceptions
+
         while True:
             try:
                 response = self._converse(request)
@@ -214,12 +243,15 @@ def from_settings(
     missing = [key for key, value in keys.items() if not value]
     if missing:
         raise provider.ProviderError(
-            f"Bedrock needs {' and '.join(missing)}. Set them in .env (see "
-            ".env.example)."
+            f"Bedrock needs {' and '.join(missing)}. Run triage setup, or "
+            "set them in .env (see .env.example)."
         )
     if os.environ.pop(_BEARER_TOKEN, None):
         logger.debug("Ignoring %s; signing with the key pair", _BEARER_TOKEN)
     region = config.get("AWS_REGION", env_file) or DEFAULT_REGION
+    import boto3
+    import botocore.config
+
     session = boto3.session.Session(
         aws_access_key_id=keys["AWS_ACCESS_KEY_ID"],
         aws_secret_access_key=keys["AWS_SECRET_ACCESS_KEY"],
@@ -240,14 +272,14 @@ def from_settings(
     return BedrockProvider(MODELS[name], client)
 
 
-def _refuses_forced_tool(error: botocore.exceptions.ClientError) -> bool:
+def _refuses_forced_tool(error: "botocore.exceptions.ClientError") -> bool:
     """Says whether Bedrock refused the request for forcing a tool call."""
     message = error.response.get("Error", {}).get("Message", "")
     return "tool_choice" in message.lower()
 
 
 def _client_error(
-    error: botocore.exceptions.ClientError, model: str
+    error: "botocore.exceptions.ClientError", model: str
 ) -> provider.ProviderError:
     """Turns a Bedrock or gateway error into a message that says what to do."""
     status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")

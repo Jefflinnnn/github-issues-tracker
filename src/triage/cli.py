@@ -14,9 +14,11 @@ import sqlite3
 import sys
 from collections.abc import Sequence
 
+from triage import completion
 from triage import config
 from triage import repo_ref
 from triage import report
+from triage import setup
 from triage.model import bedrock
 from triage.model import provider
 from triage.pipeline import extract
@@ -46,13 +48,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns:
         The process exit code.
     """
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.command is None:
+        parser.error("choose a command: setup, summary or list")
     _configure_logging(args.verbose)
+    if args.command == "completion":
+        sys.stdout.write(completion.SCRIPTS[args.shell])
+        return 0
+    if args.command == "setup":
+        if not sys.stdin.isatty():
+            print(
+                "triage: error: triage setup asks questions; run it in a "
+                "terminal, or set the values in .env (see .env.example).",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            setup.run()
+        except (KeyboardInterrupt, EOFError):
+            print("\nSetup stopped; nothing was saved.", file=sys.stderr)
+            return 1
+        return 0
     try:
         connection = load.connect(config.database_path())
         try:
             if args.command == "summary":
                 _summary(args, connection)
+            elif args.names:
+                names = [
+                    repo.name_with_owner for repo in load.history(connection)
+                ]
+                sys.stdout.write("".join(f"{name}\n" for name in names))
             else:
                 sys.stdout.write(report.history(load.history(connection)))
         finally:
@@ -99,7 +126,21 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="show debug logs"
     )
-    commands = parser.add_subparsers(dest="command", required=True)
+    # An empty metavar drops the {setup,summary,...} line above the command
+    # list; usage shows <command> instead.
+    # Not required=True: with an empty metavar, argparse's "required"
+    # message would name nothing, so main says which commands exist.
+    commands = parser.add_subparsers(dest="command", metavar="")
+    parser.usage = "triage [-h] [--version] [-v] <command> ..."
+
+    commands.add_parser(
+        "setup",
+        help="save your GitHub token, AWS keys and model",
+        description=(
+            "Ask for your GitHub token, AWS key pair, gateway and model, and "
+            "save them where only you can read them. Safe to run again."
+        ),
+    )
 
     summary = commands.add_parser(
         "summary",
@@ -140,11 +181,28 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    commands.add_parser(
+    list_command = commands.add_parser(
         "list",
         help="show the repositories you've summarized",
         description="Show the repositories you've summarized.",
     )
+    list_command.add_argument(
+        "--names",
+        action="store_true",
+        help="print only the names, one per line (Tab completion uses it)",
+    )
+
+    # No help=, so argparse leaves it out of the command list; it is only
+    # for the eval line setup writes to the shell's startup file.
+    completion_command = commands.add_parser(
+        "completion",
+        description=(
+            "Print the Tab completion script for bash or zsh. triage setup "
+            "can add it to your shell's startup file; to add it yourself, "
+            'put eval "$(triage completion zsh)" in ~/.zshrc.'
+        ),
+    )
+    completion_command.add_argument("shell", choices=sorted(completion.SCRIPTS))
     return parser
 
 

@@ -68,6 +68,8 @@ def test_summary_then_rerun_then_list(
 
     assert cli.main(["list"]) == 0
     assert "Owner/Repo  2" in capsys.readouterr().out
+    assert cli.main(["list", "--names"]) == 0
+    assert capsys.readouterr().out == "Owner/Repo\n"
 
 
 def test_missing_token_explains_what_to_do(
@@ -78,4 +80,4 @@ def test_missing_token_explains_what_to_do(
     monkeypatch.delenv("GITHUB_TOKEN")
 
     assert cli.main(["summary", "owner/repo"]) == 1
-    assert "Set GITHUB_TOKEN" in capsys.readouterr().err
+    assert "Run triage setup" in capsys.readouterr().err
