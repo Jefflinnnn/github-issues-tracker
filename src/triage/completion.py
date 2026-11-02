@@ -31,8 +31,8 @@ _triage() {
         --limit|--budget-usd|--workers) ;;
         *)
           if [[ $cur == -* ]]; then
-            COMPREPLY=($(compgen -W $'--limit\n--model\n--budget-usd\n--workers' \
-              -- "$cur"))
+            local flags=$'--limit\n--model\n--budget-usd\n--workers'
+            COMPREPLY=($(compgen -W "$flags" -- "$cur"))
           else
             COMPREPLY=($(compgen -W "$(triage list --names 2>/dev/null)" \
               -- "$cur"))
