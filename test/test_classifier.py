@@ -22,9 +22,9 @@ def _run(
 ) -> tuple[classifier.Outcome, dict[int, str]]:
     saved: dict[int, str] = {}
 
-    def save(item: transform.Issue, tag: prompt.Tag, rationale: str) -> None:
+    def save(item: transform.Issue, tagging: prompt.Tagging) -> None:
         assert threading.current_thread() is threading.main_thread()
-        saved[item.number] = tag.value
+        saved[item.number] = tagging.tag.value
 
     outcome = classifier.classify(issues, model, budget, save, workers)
     return outcome, saved
@@ -53,6 +53,21 @@ def test_two_unusable_replies_skip_the_issue() -> None:
 
     assert outcome.skipped == [1]
     assert sorted(saved) == [2, 3]
+
+
+def test_progress_counts_tagged_and_skipped_issues() -> None:
+    model = FakeModel(
+        replies=[reply("bug"), reply(None), reply(None)],
+        default=reply("feature"),
+    )
+    seen: list[tuple[int, int]] = []
+
+    classifier.classify(
+        ISSUES, model, 1.0, lambda *_: None, 1, lambda *args: seen.append(args)
+    )
+
+    # #1 is tagged, #2 is skipped after two bad replies, #3 is tagged.
+    assert seen == [(1, 3), (2, 3), (3, 3)]
 
 
 def test_stops_before_a_request_could_cross_the_budget() -> None:
@@ -126,3 +141,24 @@ def test_a_provider_error_stops_the_pass() -> None:
 def test_workers_out_of_range_are_refused() -> None:
     with pytest.raises(ValueError, match="1 to 64"):
         _run(FakeModel(), workers=65)
+
+
+def test_a_bug_needs_severity_and_priority() -> None:
+    usage = provider.Usage(1, 1)
+    bare = provider.Reply({"tag": "bug", "rationale": "Crash."}, usage)
+
+    with pytest.raises(classifier.InvalidReplyError, match="severity"):
+        classifier.validate(bare)
+
+    tagging = classifier.validate(reply("bug", severity="high", priority="low"))
+    assert (tagging.severity, tagging.priority) == (
+        prompt.Level.HIGH,
+        prompt.Level.LOW,
+    )
+
+
+def test_fields_for_another_tag_are_dropped() -> None:
+    tagging = classifier.validate(reply("question", moscow="must-have"))
+
+    assert tagging.tag is prompt.Tag.QUESTION
+    assert tagging.moscow is None

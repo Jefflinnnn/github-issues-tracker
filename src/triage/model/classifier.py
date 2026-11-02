@@ -18,11 +18,13 @@ replies arrive, because a SQLite connection can't be shared across threads.
 import collections
 import concurrent.futures
 import dataclasses
+import enum
 import logging
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
+from typing import TypeVar
 
 from triage.model import pricing
 from triage.model import prompt
@@ -35,7 +37,9 @@ ATTEMPTS = 2
 DEFAULT_WORKERS = 4
 MAX_WORKERS = provider.MAX_PARALLEL_REQUESTS
 
-SaveTag = Callable[[transform.Issue, prompt.Tag, str], None]
+SaveTag = Callable[[transform.Issue, prompt.Tagging], None]
+# Called with (issues finished, issues in all).
+Progress = Callable[[int, int], None]
 
 
 class InvalidReplyError(ValueError):
@@ -74,6 +78,7 @@ def classify(
     budget_usd: float,
     save: SaveTag,
     workers: int = DEFAULT_WORKERS,
+    progress: Progress | None = None,
 ) -> Outcome:
     """Tags the issues, several at a time, until done or out of budget.
 
@@ -83,10 +88,13 @@ def classify(
         model: The provider to send requests to. It must be safe to call
             from several threads; the SDK clients are.
         budget_usd: Most this pass may spend.
-        save: Called with each issue, its tag and the rationale as soon as
-            the tag is known, always on the calling thread, so progress
+        save: Called with each issue and its tagging as soon as it is
+            known, always on the calling thread, so progress
             survives a later failure.
         workers: Most requests in flight at once, 1 to ``MAX_WORKERS``.
+        progress: Called on the calling thread each time an issue is
+            tagged or given up on, with how many are finished and the
+            total.
 
     Returns:
         What the pass did.
@@ -110,6 +118,10 @@ def classify(
     priciest = 0.0
     tagged = 0
     skipped: list[int] = []
+
+    def report() -> None:
+        if progress is not None:
+            progress(tagged + len(skipped), len(issues))
 
     def affordable() -> bool:
         if spent >= budget_usd:
@@ -138,9 +150,9 @@ def classify(
                 spent += request_cost
                 priciest = max(priciest, request_cost)
                 try:
-                    tag, rationale = validate(reply)
+                    tagging = validate(reply)
                 except InvalidReplyError as error:
-                    logger.warning(
+                    logger.debug(
                         "#%d: unusable reply (attempt %d of %d): %s",
                         job.issue.number,
                         job.attempt,
@@ -154,18 +166,21 @@ def classify(
                         )
                     else:
                         skipped.append(job.issue.number)
+                        report()
                     continue
-                save(job.issue, tag, rationale)
+                save(job.issue, tagging)
                 tagged += 1
+                report()
     finally:
         # On a failure, drop requests that haven't started.
         executor.shutdown(wait=True, cancel_futures=True)
 
     left = len({job.issue.id for job in queue})
     if left:
-        logger.warning(
-            "Budget reached ($%.4f of $%.2f); %d %s left untagged. Run again "
-            "or raise --budget-usd.",
+        # The summary's Run line says how many are left; no need to say it
+        # twice.
+        logger.debug(
+            "Budget reached ($%.4f of $%.2f); %d %s left untagged",
             spent,
             budget_usd,
             left,
@@ -174,33 +189,57 @@ def classify(
     return Outcome(tagged, sorted(skipped), left, spent)
 
 
-def validate(reply: provider.Reply) -> tuple[prompt.Tag, str]:
-    """Checks a reply and returns its tag and rationale.
+def validate(reply: provider.Reply) -> prompt.Tagging:
+    """Checks a reply and returns what the model decided.
 
-    A rationale longer than allowed is cut rather than retried: the tag is
-    what matters, and a retry costs a request.
+    A bug must come with a severity and a priority, and a feature with a
+    MoSCoW priority; those fields are dropped for other tags. A rationale
+    longer than allowed is cut rather than retried: the tags are what
+    matter, and a retry costs a request.
 
     Args:
         reply: The provider's reply.
 
     Returns:
-        The tag and the rationale.
+        The tagging.
 
     Raises:
-        InvalidReplyError: The reply is missing, has an unknown tag or has
-            no rationale.
+        InvalidReplyError: The reply is missing, has an unknown value, lacks
+            a field its tag needs, or has no rationale.
     """
     if reply.data is None:
         raise InvalidReplyError(reply.problem or "no reply")
     data: Mapping[str, Any] = reply.data
-    try:
-        tag = prompt.Tag(data.get("tag"))
-    except ValueError:
-        allowed = ", ".join(tag.value for tag in prompt.Tag)
-        raise InvalidReplyError(
-            f"tag {data.get('tag')!r} isn't one of {allowed}"
-        ) from None
+    tag = _enum(prompt.Tag, data, "tag")
     rationale = data.get("rationale")
     if not isinstance(rationale, str) or not rationale.strip():
         raise InvalidReplyError("the rationale is missing")
-    return tag, rationale.strip()[: prompt.RATIONALE_MAX_CHARS]
+    rationale = rationale.strip()[: prompt.RATIONALE_MAX_CHARS]
+    if tag is prompt.Tag.BUG:
+        return prompt.Tagging(
+            tag,
+            rationale,
+            severity=_enum(prompt.Level, data, "severity"),
+            priority=_enum(prompt.Level, data, "priority"),
+        )
+    if tag is prompt.Tag.FEATURE:
+        return prompt.Tagging(
+            tag, rationale, moscow=_enum(prompt.Moscow, data, "moscow")
+        )
+    return prompt.Tagging(tag, rationale)
+
+
+_EnumT = TypeVar("_EnumT", bound=enum.Enum)
+
+
+def _enum(kind: type[_EnumT], data: Mapping[str, Any], field: str) -> _EnumT:
+    """Reads one field that must hold one of an enum's values."""
+    allowed = ", ".join(str(member.value) for member in kind)
+    if field not in data or data[field] is None:
+        raise InvalidReplyError(f"{field} is missing; give one of {allowed}")
+    try:
+        return kind(data[field])
+    except ValueError:
+        raise InvalidReplyError(
+            f"{field} {data[field]!r} isn't one of {allowed}"
+        ) from None

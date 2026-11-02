@@ -160,7 +160,7 @@ class OpenAICompatibleProvider:
                 if self._length_setting == "max_tokens"
                 else "max_tokens"
             )
-            logger.info("Retrying with %s", self._length_setting)
+            logger.debug("Retrying with %s", self._length_setting)
             return self._client.chat.completions.create(
                 model=self.model,
                 **{self._length_setting: max_output_tokens},
