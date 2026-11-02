@@ -9,6 +9,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 from triage import repo_ref
@@ -24,6 +25,9 @@ COMMENTS_PER_ISSUE = 10
 # A hard stop so a typo'd giant repository can't page forever. Larger
 # repositories need --limit.
 MAX_ISSUES = 20_000
+
+# Called with (issues fetched so far, issues to fetch or 0 if unknown).
+Progress = Callable[[int, int], None]
 
 _ISSUE_FIELDS = """
         id
@@ -121,7 +125,10 @@ class Extracted:
 
 
 def fetch_open_issues(
-    repo: repo_ref.RepoRef, limit: int, token: str
+    repo: repo_ref.RepoRef,
+    limit: int,
+    token: str,
+    progress: Progress | None = None,
 ) -> Extracted:
     """Fetches a repository's open issues, following GitHub's pages.
 
@@ -130,6 +137,8 @@ def fetch_open_issues(
         limit: Most issues to fetch, most recently updated first; 0
             fetches all of them.
         token: A GitHub token that can read the repository.
+        progress: Called after each page with the issues fetched so far
+            and how many there are to fetch.
 
     Returns:
         The repository and its open issues.
@@ -141,15 +150,24 @@ def fetch_open_issues(
     """
     if limit < 0:
         raise ValueError(f"limit must be 0 or more, got {limit}")
-    logger.info("Fetching open issues of %s", repo.full_name)
+    logger.debug("Fetching open issues")
     direction = "DESC" if limit else "ASC"
     return _fetch_pages(
-        OPEN_ISSUES_QUERY, repo, token, limit, {"direction": direction}
+        OPEN_ISSUES_QUERY,
+        repo,
+        token,
+        limit,
+        {"direction": direction},
+        progress,
+        counts_open=True,
     )
 
 
 def fetch_changed_issues(
-    repo: repo_ref.RepoRef, since: str, token: str
+    repo: repo_ref.RepoRef,
+    since: str,
+    token: str,
+    progress: Progress | None = None,
 ) -> Extracted:
     """Fetches every issue created, changed or closed since a time.
 
@@ -157,6 +175,8 @@ def fetch_changed_issues(
         repo: The repository to read.
         since: ISO 8601 time; issues updated at or after it are returned.
         token: A GitHub token that can read the repository.
+        progress: Called after each page with the issues fetched so far,
+            and 0, since GitHub doesn't say how many changed.
 
     Returns:
         The repository and the changed issues, open or closed.
@@ -165,8 +185,10 @@ def fetch_changed_issues(
         GitHubError: A request failed or there are more than
             ``MAX_ISSUES`` changes.
     """
-    logger.info("Fetching issues of %s changed since %s", repo.full_name, since)
-    return _fetch_pages(CHANGED_ISSUES_QUERY, repo, token, 0, {"since": since})
+    logger.debug("Fetching issues changed since %s", since)
+    return _fetch_pages(
+        CHANGED_ISSUES_QUERY, repo, token, 0, {"since": since}, progress
+    )
 
 
 def _fetch_pages(
@@ -175,8 +197,14 @@ def _fetch_pages(
     token: str,
     limit: int,
     extra_variables: dict[str, Any],
+    progress: Progress | None = None,
+    counts_open: bool = False,
 ) -> Extracted:
-    """Runs a paged issues query until it ends or reaches the limit."""
+    """Runs a paged issues query until it ends or reaches the limit.
+
+    ``counts_open`` says the query lists open issues, so their total is
+    known and ``progress`` gets it.
+    """
     cap = limit or MAX_ISSUES
     nodes: dict[str, dict[str, Any]] = {}
     after: str | None = None
@@ -193,6 +221,9 @@ def _fetch_pages(
         # An issue edited while paging comes back again; keep the newest.
         for node in repository["issues"]["nodes"]:
             nodes[node["id"]] = node
+        if progress is not None:
+            total = repository["openIssues"]["totalCount"]
+            progress(len(nodes), min(cap, total) if counts_open else 0)
         page_info = repository["issues"]["pageInfo"]
         if not page_info["hasNextPage"] or len(nodes) >= cap:
             break

@@ -9,8 +9,10 @@ import datetime
 import logging
 import sqlite3
 
+from triage import progress
 from triage import repo_ref
 from triage.model import classifier
+from triage.model import demand
 from triage.model import prompt
 from triage.model import provider
 from triage.pipeline import extract
@@ -37,8 +39,10 @@ class RunResult:
         fetched: Issues fetched this run, open or closed.
         open_on_github: Open issues on GitHub right now.
         flagged: The stored open issues with their computed flags.
-        tags: ``{issue ID: (tag, rationale)}`` for issues with an
-            up-to-date tag.
+        tags: ``{issue ID: tagging}`` for issues with an up-to-date tag. A
+            feature's MoSCoW priority already includes the demand floor.
+        raised: IDs of features whose priority the demand floor raised
+            above what the model chose.
         model: The model ID that tagged them.
         outcome: What the model step did this run.
         budget_usd: The run's budget.
@@ -52,7 +56,8 @@ class RunResult:
     fetched: int
     open_on_github: int
     flagged: list[transform.FlaggedIssue]
-    tags: dict[str, tuple[str, str]]
+    tags: dict[str, prompt.Tagging]
+    raised: set[str]
     model: str
     outcome: classifier.Outcome
     budget_usd: float
@@ -67,6 +72,7 @@ def run(
     budget_usd: float,
     now: datetime.datetime,
     workers: int = classifier.DEFAULT_WORKERS,
+    status: progress.Status | None = None,
 ) -> RunResult:
     """Fetches what's new for a repository, stores it and tags its issues.
 
@@ -79,7 +85,9 @@ def run(
     stored issues GitHub no longer lists as open are marked closed.
 
     The model then tags open issues that are new, changed or tagged under
-    another model or prompt version, most recently updated first.
+    another model or prompt version, most recently updated first. With a
+    limit, it looks only at the issues this run fetched, so a small limit
+    means a small run; older untagged issues wait for a run without one.
 
     Args:
         repo: The repository.
@@ -90,18 +98,36 @@ def run(
         budget_usd: Most the model step may spend this run.
         now: The current time, timezone-aware.
         workers: Most model requests in flight at once.
+        status: Where to show fetch and tagging progress; None shows
+            nothing.
 
     Returns:
         The run's result.
     """
+    status = status or progress.Status(live=False)
+
+    def fetching(label: str) -> extract.Progress:
+        def show(done: int, total: int) -> None:
+            if total:
+                status.bar(label, done, total)
+            else:
+                status.show(f"{label} {done}…")
+
+        status.show(f"{label}…")
+        return show
+
     since = load.last_run_started(connection, repo.full_name)
     if limit:
         fetch = "limited"
-        extracted = extract.fetch_open_issues(repo, limit, token)
+        extracted = extract.fetch_open_issues(
+            repo, limit, token, fetching("Fetching")
+        )
         saw_every_open = len(extracted.nodes) >= extracted.total_open
         nodes = {node["id"]: node for node in extracted.nodes}
         if since is not None:
-            changes = extract.fetch_changed_issues(repo, since, token)
+            changes = extract.fetch_changed_issues(
+                repo, since, token, fetching("Fetching changes")
+            )
             # The newest copy of each issue wins.
             for node in changes.nodes:
                 kept = nodes.get(node["id"])
@@ -110,12 +136,16 @@ def run(
         fetched_nodes = list(nodes.values())
     elif since is not None and load.is_complete(connection, repo.full_name):
         fetch = "changes"
-        extracted = extract.fetch_changed_issues(repo, since, token)
+        extracted = extract.fetch_changed_issues(
+            repo, since, token, fetching("Fetching changes")
+        )
         saw_every_open = False
         fetched_nodes = extracted.nodes
     else:
         fetch = "all"
-        extracted = extract.fetch_open_issues(repo, 0, token)
+        extracted = extract.fetch_open_issues(
+            repo, 0, token, fetching("Fetching")
+        )
         saw_every_open = True
         fetched_nodes = extracted.nodes
     open_ids = {node["id"] for node in extracted.nodes}
@@ -128,7 +158,7 @@ def run(
             connection, extracted.repository["id"], open_ids, now
         )
         if closed:
-            logger.info(
+            logger.debug(
                 "Marked %d %s closed that GitHub no longer lists as open",
                 closed,
                 "issue" if closed == 1 else "issues",
@@ -137,26 +167,37 @@ def run(
     stored = load.open_issues(connection, name)
 
     current = load.current_tags(connection, name, model.model, prompt.VERSION)
+    fetched_ids = {node["id"] for node in fetched_nodes}
     pending = sorted(
-        (issue for issue in stored if issue.id not in current),
+        (
+            issue
+            for issue in stored
+            if issue.id not in current
+            and (not limit or issue.id in fetched_ids)
+        ),
         key=lambda issue: issue.updated_at,
         reverse=True,
     )
-    logger.info(
-        "Tagging %d %s with %s",
-        len(pending),
-        "issue" if len(pending) == 1 else "issues",
-        model.model,
+
+    def tagging(done: int, total: int) -> None:
+        status.bar("Tagging", done, total)
+
+    if pending:
+        tagging(0, len(pending))
+
+    def save(issue: transform.Issue, tagging: prompt.Tagging) -> None:
+        load.save_tag(connection, issue, tagging, model.model, prompt.VERSION)
+
+    outcome = classifier.classify(
+        pending, model, budget_usd, save, workers, tagging
     )
-
-    def save(issue: transform.Issue, tag: prompt.Tag, rationale: str) -> None:
-        load.save_tag(
-            connection, issue, tag.value, rationale, model.model, prompt.VERSION
-        )
-
-    outcome = classifier.classify(pending, model, budget_usd, save, workers)
+    status.clear()
     load.finish_run(
         connection, run_id, model.model, outcome.tagged, outcome.spent_usd
+    )
+    tags, raised = _with_demand_floor(
+        load.current_tags(connection, name, model.model, prompt.VERSION),
+        stored,
     )
     return RunResult(
         name_with_owner=name,
@@ -167,8 +208,39 @@ def run(
         fetched=len(issues),
         open_on_github=extracted.total_open,
         flagged=transform.flag_issues(stored, now),
-        tags=load.current_tags(connection, name, model.model, prompt.VERSION),
+        tags=tags,
+        raised=raised,
         model=model.model,
         outcome=outcome,
         budget_usd=budget_usd,
     )
+
+
+def _with_demand_floor(
+    tags: dict[str, prompt.Tagging], issues: list[transform.Issue]
+) -> tuple[dict[str, prompt.Tagging], set[str]]:
+    """Raises each feature's priority to the floor its demand sets.
+
+    Args:
+        tags: The stored taggings, as the model gave them.
+        issues: The repository's open issues.
+
+    Returns:
+        The taggings with floors applied, and the IDs of features the
+        floor raised.
+    """
+    features = [
+        issue
+        for issue in issues
+        if issue.id in tags and tags[issue.id].tag is prompt.Tag.FEATURE
+    ]
+    final = dict(tags)
+    raised = set()
+    for issue_id, floor in demand.floors(features).items():
+        tagging = tags[issue_id]
+        picked = tagging.moscow or prompt.Moscow.COULD
+        lifted = demand.raise_to(picked, floor)
+        if lifted is not picked:
+            final[issue_id] = dataclasses.replace(tagging, moscow=lifted)
+            raised.add(issue_id)
+    return final, raised

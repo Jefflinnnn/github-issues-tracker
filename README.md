@@ -207,7 +207,8 @@ triage summary owner/name --limit 100
 
 triage then fetches the 100 most recently updated open issues, plus
 whatever changed since the last run, so issues already stored never go
-stale. You can change the limit from run to run. A later run without
+stale. The model tags only those issues, so a small limit means a quick,
+cheap run. You can change the limit from run to run. A later run without
 `--limit` notices that issues were left out and fetches every open issue
 once to fill them in. Whenever a run sees every open issue, issues that
 GitHub no longer lists as open are marked closed.
@@ -223,15 +224,54 @@ core:
 | `docs` | Documentation is missing, wrong or unclear |
 | `other` | A discussion, tracker, announcement or spam |
 
-The model reads the title, labels, opening post and the 10 latest
-comments, and gives a one-sentence reason with each tag. An issue goes back
-to the model only when it changes, so a rerun costs little. The summary
-counts issues per tag and lists them in each group, up to 10 per group:
+Bugs and features get a second level:
 
+- **Bugs**: severity (how bad it is when it happens) and priority (how
+  soon to fix it), each `high` or `low`, shown as `bug high/low`.
+- **Features**: `must-have`, `should-have` or `could-have`.
+
+The model judges these from evidence in the issue: the report itself,
+duplicates, other users affected or asking, and the engagement numbers
+triage gives it with each issue. How fast maintainers replied doesn't
+count.
+
+For features, demand also sets a floor. Demand is reactions plus the
+number of people besides the opener who commented; it counts people, not
+comments, so a long back-and-forth between two people isn't demand.
+Ranked against the repository's other open feature requests, the top 5%
+(with demand of at least 10) can't be below must-have, and the top 20%
+(at least 3) can't be below should-have. The floor only ever raises the
+model's choice, and it's recomputed on every run, so a request that picks
+up support rises without being sent to the model again. The summary marks
+raised features with ↑.
+
+The model reads the title, labels, opening post and the 10 latest
+comments, and gives a one-sentence reason with its tags. An issue goes
+back to the model only when it changes, so a rerun costs little. The
+summary counts issues per tag and lists them in groups, up to 10 per
+group:
+
+- **Bugs to fix first**: high-priority bugs, high severity first.
+- **Most-wanted features**: must-have features, by demand.
 - **Hot**: among the busiest tenth of open issues by reactions plus
   comments, with at least 3.
 - **Stale**: no comment from a person in 60 days. Bot comments and label
   edits don't count.
+
+While it runs, triage shows its progress on one line of the terminal: a
+bar for fetching, then one for tagging. The line disappears when the run
+ends, and the summary starts with three header lines:
+
+```text
+owner/name · 150 open · 12 hot · 31 stale
+Tags: bug 41 (6 high priority) · feature 52 (4 must-have) · question 30 · docs 9 · other 6
+Run: first run, 150 fetched · 138 tagged · $0.29 of $0.30 · 12 left for next run
+```
+
+The Run line says what this run fetched, how many issues the model tagged,
+what that cost against `--budget-usd`, and how many issues the budget left
+for the next run. It names any issues whose replies were unusable twice.
+Warnings print above the summary, separated by a blank line.
 
 Show the repositories you've summarized:
 
@@ -247,7 +287,7 @@ Options:
 | `--model NAME` (summary) | `TRIAGE_MODEL`, then `haiku` | `haiku`, `sonnet` or `opus` |
 | `--budget-usd USD` (summary) | 0.50 | Most the model may spend this run |
 | `--workers N` (summary) | 4 | Model requests sent at once, 1 to 64 |
-| `-v` | off | Show debug logs |
+| `-v` | off | Show debug logs, such as each fetch and unusable reply |
 
 ### Limits
 

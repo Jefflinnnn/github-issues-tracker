@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from triage import completion
 from triage import config
 from triage import menu
+from triage import progress
 from triage import repo_ref
 from triage import report
 from triage import setup
@@ -54,7 +55,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command is None:
         parser.error("choose a command: setup, summary or list")
-    _configure_logging(args.verbose)
+    status = progress.Status()
+    log = _configure_logging(args.verbose, status)
     if args.command == "completion":
         sys.stdout.write(completion.SCRIPTS[args.shell])
         return 0
@@ -76,7 +78,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         connection = load.connect(config.database_path())
         try:
             if args.command == "summary":
-                _summary(args, connection)
+                _summary(args, connection, status, log)
             elif args.names:
                 names = [
                     repo.name_with_owner for repo in load.history(connection)
@@ -92,22 +94,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _summary(args: argparse.Namespace, connection: sqlite3.Connection) -> None:
-    """Runs the pipeline on one repository and prints its summary."""
+def _summary(
+    args: argparse.Namespace,
+    connection: sqlite3.Connection,
+    status: progress.Status,
+    log: progress.LogHandler,
+) -> None:
+    """Runs the pipeline on one repository and prints its summary.
+
+    Progress shows on one status line, erased when the run ends. If any
+    log lines were printed during the run, a blank line separates them
+    from the summary.
+    """
     repo = repo_ref.parse(args.repo)
     token = config.github_token()
     # Settings are checked before fetching, so a missing key fails fast.
     model = providers.from_settings(args.model)
-    result = run.run(
-        repo=repo,
-        limit=args.limit,
-        token=token,
-        connection=connection,
-        model=model,
-        budget_usd=args.budget_usd,
-        workers=args.workers,
-        now=datetime.datetime.now(datetime.timezone.utc),
-    )
+    try:
+        result = run.run(
+            repo=repo,
+            limit=args.limit,
+            token=token,
+            connection=connection,
+            model=model,
+            budget_usd=args.budget_usd,
+            workers=args.workers,
+            now=datetime.datetime.now(datetime.timezone.utc),
+            status=status,
+        )
+    finally:
+        status.clear()
+    if log.printed:
+        print(file=sys.stderr)
     width = shutil.get_terminal_size().columns
     sys.stdout.write(report.summary(result, width))
 
@@ -258,17 +276,30 @@ def _positive_dollars(text: str) -> float:
     return value
 
 
-def _configure_logging(verbose: bool) -> None:
-    """Sends progress lines to stderr, and debug logs with ``-v``."""
-    handler = logging.StreamHandler(sys.stderr)
+def _configure_logging(
+    verbose: bool, status: progress.Status
+) -> progress.LogHandler:
+    """Sends warnings to stderr, and debug logs too with ``-v``.
+
+    Args:
+        verbose: Whether to show debug logs.
+        status: The status line log lines must keep clear of.
+
+    Returns:
+        The handler, which counts the lines it printed.
+    """
+    handler = progress.LogHandler(status)
     handler.setFormatter(
         logging.Formatter(
-            "%(levelname)s %(name)s: %(message)s" if verbose else "%(message)s"
+            "%(levelname)s %(name)s: %(message)s"
+            if verbose
+            else "triage: warning: %(message)s"
         )
     )
     root = logging.getLogger()
     root.handlers = [handler]
-    root.setLevel(logging.DEBUG if verbose else logging.WARNING)
+    root.setLevel(logging.WARNING)
     logging.getLogger("triage").setLevel(
-        logging.DEBUG if verbose else logging.INFO
+        logging.DEBUG if verbose else logging.WARNING
     )
+    return handler
