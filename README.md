@@ -63,7 +63,7 @@ This run tagged 2. Used <$0.01 of $0.50 budget.
   - [List past runs](#list-past-runs)
 - [Reading the output](#reading-the-output)
 - [Limits and cost](#limits-and-cost)
-- [Notes](#notes)
+- [How I thought about this & AI Collaboration Notes](#notes)
 
 ## Requirements
 
