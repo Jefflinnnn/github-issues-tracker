@@ -7,6 +7,7 @@ override.
 
 import os
 import pathlib
+from collections.abc import Collection
 from collections.abc import Mapping
 
 ENV_FILE = pathlib.Path(".env")
@@ -88,6 +89,27 @@ def database_path(env_file: pathlib.Path = ENV_FILE) -> pathlib.Path:
         return pathlib.Path(override).expanduser()
     data_home = os.environ.get("XDG_DATA_HOME") or "~/.local/share"
     return pathlib.Path(data_home).expanduser() / "triage" / "triage.db"
+
+
+def comment_out(keys: Collection[str], env_file: pathlib.Path) -> None:
+    """Turns a dotenv file's lines for some keys into comments.
+
+    The lines stay, with ``# `` in front, so nothing is lost. Other lines
+    and the file's permissions are kept.
+
+    Args:
+        keys: The keys whose lines to comment out.
+        env_file: The file to change; a missing one is left alone.
+    """
+    if not env_file.is_file():
+        return
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        name, separator, _ = line.strip().partition("=")
+        key = name.strip().removeprefix("export ")
+        if separator and not name.startswith("#") and key in keys:
+            lines[index] = f"# {line}"
+    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def read_env_file(env_file: pathlib.Path) -> dict[str, str]:

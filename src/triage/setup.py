@@ -11,9 +11,11 @@ Tab completion goes to your shell's startup file, after you say yes.
 
 import dataclasses
 import getpass
+import json
 import os
 import pathlib
 import urllib.parse
+import urllib.request
 from collections.abc import Callable
 from collections.abc import Mapping
 
@@ -33,9 +35,13 @@ TOKEN_URL = "https://github.com/settings/personal-access-tokens/new"
 NO_GATEWAY = "-"
 OLLAMA_URL = "http://localhost:11434/v1"
 LM_STUDIO_URL = "http://localhost:1234/v1"
-# Models known to call tools well on a laptop; pull one before using it.
-LOCAL_MODELS = ("qwen3:8b", "llama3.1:8b")
-_LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+# Models known to call tools well on a laptop, best first.
+LOCAL_MODELS = ("llama3.1:8b", "qwen2.5:14b")
+# Families that think before answering; the thinking can use up the reply
+# before the model calls the tool.
+_THINKING = ("qwen3", "deepseek-r1")
+# How long to wait for a local server's model list.
+LIST_TIMEOUT_S = 3
 
 # The first question: what the user has. Each maps to a provider; the last
 # two are OpenAI-compatible servers other than OpenAI itself.
@@ -60,6 +66,26 @@ _PROVIDER = {
     "bedrock": "bedrock",
     "local": "openai",
     "other": "openai",
+}
+# The settings each kind of access uses, besides the common ones.
+_COMMON_KEYS = (
+    "GITHUB_TOKEN",
+    "TRIAGE_PROVIDER",
+    "TRIAGE_MODEL",
+    "TRIAGE_PRICE_PER_MTOK",
+)
+_OPENAI_KEYS = ("OPENAI_API_KEY", "OPENAI_BASE_URL")
+_ACCESS_KEYS = {
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "openai": _OPENAI_KEYS,
+    "bedrock": (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_REGION",
+        "BEDROCK_ENDPOINT_URL",
+    ),
+    "local": _OPENAI_KEYS,
+    "other": _OPENAI_KEYS,
 }
 
 
@@ -227,7 +253,9 @@ def run(
         view.update(_MODELS[source](terminal, view, current))
         progress["model_source"] = source
         model = view.get("TRIAGE_MODEL", "")
-        if source == "local":
+        if source == "local" and model not in (
+            installed_models(view.get("OPENAI_BASE_URL") or OLLAMA_URL) or []
+        ):
             return True, f"{model} (pull it first: ollama pull {model})"
         return True, model
 
@@ -289,14 +317,7 @@ def run(
         say(f"\nSaved to {path}.")
     else:
         say("\nNothing changed.")
-    overridden = sorted(
-        key for key in changes if config.read_env_file(config.ENV_FILE).get(key)
-    )
-    if overridden:
-        say(
-            f"Note: .env in this folder sets {', '.join(overridden)}, which "
-            "wins over setup's values when you run triage here."
-        )
+    _offer_to_unshadow(terminal, view, progress["source"])
 
     if _yes(terminal, "\nSend a tiny test request to check the key and model?"):
         try:
@@ -308,6 +329,39 @@ def run(
             return
         say(f"✓ {model.model} answered.")
     say("\nReady. Try: triage summary owner/name")
+
+
+def _offer_to_unshadow(
+    terminal: Terminal, view: Mapping[str, str], source: str
+) -> None:
+    """Offers to comment out .env lines that would override setup's choice.
+
+    A .env in the current folder wins over setup's file, so a model set
+    there for another provider would be used instead of the one just
+    picked. Only key names are shown, never values.
+
+    Args:
+        terminal: Where to ask.
+        view: The settings setup ended with.
+        source: The kind of access picked.
+    """
+    folder = config.read_env_file(config.ENV_FILE)
+    overridden = [
+        key
+        for key in (*_COMMON_KEYS, *_ACCESS_KEYS[source])
+        if folder.get(key) and folder[key] != view.get(key, "")
+    ]
+    if not overridden:
+        return
+    terminal.say(
+        f"\n.env in this folder sets {', '.join(overridden)}, which would "
+        "win over these settings when you run triage here."
+    )
+    if _yes(terminal, "Comment those lines out of .env?"):
+        config.comment_out(overridden, config.ENV_FILE)
+        terminal.say("✓ Commented out; the lines stay in .env as comments.")
+    else:
+        terminal.say("Kept. Run triage from another folder, or edit .env.")
 
 
 def _yes(terminal: Terminal, question: str) -> bool:
@@ -413,8 +467,7 @@ def _source(saved: Mapping[str, str]) -> str:
     base_url = saved.get("OPENAI_BASE_URL", "")
     if not base_url:
         return "openai"
-    host = urllib.parse.urlparse(base_url).hostname or ""
-    return "local" if host in _LOCAL_HOSTS else "other"
+    return "local" if openai_compat.is_local(base_url) else "other"
 
 
 def _pick_source(terminal: Terminal, default: str, current: str) -> str:
@@ -465,7 +518,9 @@ def _local_keys(terminal: Terminal, saved: Mapping[str, str]) -> dict[str, str]:
     current = saved.get("OPENAI_BASE_URL", "")
     default = current if _source(saved) == "local" else OLLAMA_URL
     terminal.say(
-        f"  Ollama listens on {OLLAMA_URL}; LM Studio on {LM_STUDIO_URL}."
+        f"  Ollama listens on {OLLAMA_URL}; LM Studio on {LM_STUDIO_URL}. "
+        "Start Ollama with OLLAMA_CONTEXT_LENGTH=8192 ollama serve, so long "
+        "issues fit."
     )
     url = terminal.ask(f"  Base URL [{default}]: ").strip() or default
     changes = {} if url == current else {"OPENAI_BASE_URL": url}
@@ -595,12 +650,59 @@ def _openai_model(
             default = index
 
 
+def installed_models(base_url: str) -> list[str] | None:
+    """Asks a local server which models it has, e.g. what Ollama pulled.
+
+    Args:
+        base_url: The server's OpenAI-compatible base URL.
+
+    Returns:
+        The model names, sorted; None when nothing answered. Ollama's
+        cloud models (``…:cloud``) are left out, since they don't run
+        locally.
+    """
+    url = base_url.rstrip("/") + "/models"
+    try:
+        with urllib.request.urlopen(url, timeout=LIST_TIMEOUT_S) as response:
+            data = json.load(response)
+    except (OSError, ValueError):
+        return None
+    items = data.get("data", []) if isinstance(data, dict) else []
+    return sorted(
+        {
+            item["id"]
+            for item in items
+            if isinstance(item, dict)
+            and isinstance(item.get("id"), str)
+            and not item["id"].endswith(":cloud")
+        }
+    )
+
+
 def _local_model(
     terminal: Terminal, saved: Mapping[str, str], saved_model: str
 ) -> dict[str, str]:
-    """Picks a suggested local model, or another one by name."""
-    names = list(LOCAL_MODELS)
-    labels = [f"{name}  free, runs on your machine" for name in names] + [
+    """Picks one of the server's models, a suggested one, or a typed name.
+
+    The models the server already has come first, the suggested ones
+    first among them; suggested models it lacks follow, to pull.
+    """
+    base_url = saved.get("OPENAI_BASE_URL") or OLLAMA_URL
+    found = installed_models(base_url)
+    if found is None:
+        terminal.say(
+            f"  Nothing answered at {base_url}. Start Ollama to pick from "
+            "your models; until then, pick one to pull."
+        )
+    elif not found:
+        terminal.say(
+            f"  No models yet. Pull one, e.g. ollama pull {LOCAL_MODELS[0]}"
+        )
+    have = found or []
+    ranked = {name: rank for rank, name in enumerate(LOCAL_MODELS)}
+    names = sorted(have, key=lambda name: ranked.get(name, len(ranked)))
+    names += [name for name in LOCAL_MODELS if name not in have]
+    labels = [_local_label(name, name in have) for name in names] + [
         "Another model (type its name)"
     ]
     if saved_model in names:
@@ -613,11 +715,21 @@ def _local_model(
             name = names[index]
             break
         try:
-            name = _ask_name(terminal, saved_model, "qwen3:14b")
+            name = _ask_name(terminal, saved_model, LOCAL_MODELS[1])
             break
         except menu.BackError:
             default = index
     return _model_changes(saved, name, "0,0")
+
+
+def _local_label(name: str, installed: bool) -> str:
+    """Describes a local model in the menu, e.g. ``installed, suggested``."""
+    notes = ["installed" if installed else f"pull first: ollama pull {name}"]
+    if name in LOCAL_MODELS:
+        notes.append("suggested")
+    if name.startswith(_THINKING):
+        notes.append("thinks first, may not tag")
+    return f"{name}  {', '.join(notes)}"
 
 
 def _other_model(

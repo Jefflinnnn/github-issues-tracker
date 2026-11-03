@@ -158,3 +158,25 @@ def test_openai_switches_to_max_completion_tokens_when_told() -> None:
         "max_completion_tokens",
         "max_completion_tokens",
     ]
+
+
+def test_a_local_server_gets_longer_and_says_when_it_timed_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx2
+    import openai
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("TRIAGE_MODEL", "llama3.1:8b")
+    monkeypatch.setenv("TRIAGE_PRICE_PER_MTOK", "0,0")
+    monkeypatch.setenv("TRIAGE_PROVIDER", "openai")
+    model = providers.from_settings()
+    assert model._client.timeout == openai_compat.LOCAL_TIMEOUT_S  # type: ignore[attr-defined]
+
+    timeout = openai.APITimeoutError(
+        request=httpx2.Request("POST", "http://localhost:11434/v1")
+    )
+    message = str(openai_compat._error(timeout, "llama3.1:8b", 300))
+    assert message.startswith("llama3.1:8b didn't answer within 300 seconds")
+    assert openai_compat.is_local("http://127.0.0.1:1234/v1")
+    assert not openai_compat.is_local("https://api.groq.com/openai/v1")
