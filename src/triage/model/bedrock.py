@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 NAME = "bedrock"
-TOOL_NAME = "tag_issue"
+TOOL_NAME = provider.TOOL_NAME
 DEFAULT_REGION = "us-west-2"
 
 
@@ -172,8 +172,8 @@ class BedrockProvider:
                 "tools": [
                     {
                         "toolSpec": {
-                            "name": TOOL_NAME,
-                            "description": "Record the issue's tag.",
+                            "name": request.tool_name,
+                            "description": request.tool_description,
                             "inputSchema": {"json": dict(request.schema)},
                         }
                     }

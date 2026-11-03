@@ -192,3 +192,13 @@ def test_a_reply_needs_a_summary_and_a_long_one_is_cut() -> None:
     cut = classifier.validate(reply("docs", summary="word " * 60)).summary
     assert len(cut) <= prompt.SUMMARY_HARD_MAX_CHARS
     assert cut.endswith("word…")
+
+
+def test_a_change_note_is_optional_and_cut_at_a_word() -> None:
+    noted = classifier.validate(reply("bug", change="Fix released in 3.4.3"))
+    long = classifier.validate(reply("bug", change="word " * 60))
+
+    assert noted.change_note == "Fix released in 3.4.3"
+    assert classifier.validate(reply("bug")).change_note is None
+    assert long.change_note is not None
+    assert len(long.change_note) <= prompt.CHANGE_HARD_MAX_CHARS

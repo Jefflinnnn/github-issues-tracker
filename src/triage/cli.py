@@ -119,7 +119,7 @@ def _summary(
             model=model,
             budget_usd=args.budget_usd,
             workers=args.workers,
-            now=datetime.datetime.now(datetime.timezone.utc),
+            now=_now(),
             status=status,
         )
     finally:
@@ -136,6 +136,11 @@ def _summary(
             stale=args.stale,
         )
     )
+
+
+def _now() -> datetime.datetime:
+    """Returns the current time; tests replace it to control the clock."""
+    return datetime.datetime.now(datetime.timezone.utc)
 
 
 def _build_parser() -> argparse.ArgumentParser:

@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from triage.model import digest
 from triage.model import pricing
 from triage.model import provider
 from triage.pipeline import extract
@@ -178,7 +179,10 @@ class FakeModel:
     Attributes:
         replies: Replies to give first, in order.
         default: The reply after ``replies`` run out.
-        requests: Every request received.
+        requests: Every tagging request received.
+        digest: The digest it writes when asked for one; None gives an
+            unusable reply.
+        digest_requests: Every digest request received.
         name: The provider's name.
         model: The model ID.
         price: $1.10 in, $5.50 out per million tokens; None for unknown.
@@ -187,11 +191,21 @@ class FakeModel:
     replies: list[provider.Reply] = dataclasses.field(default_factory=list)
     default: provider.Reply | None = None
     requests: list[provider.Request] = dataclasses.field(default_factory=list)
+    digest: str | None = "Things changed."
+    digest_requests: list[provider.Request] = dataclasses.field(
+        default_factory=list
+    )
     name: str = "bedrock"
     model: str = MODEL_ID
     price: pricing.Price | None = pricing.Price(1.10, 5.50)
 
     def classify(self, request: provider.Request) -> provider.Reply:
+        if request.tool_name == digest.TOOL_NAME:
+            self.digest_requests.append(request)
+            usage = provider.Usage(1_000, 50)
+            if self.digest is None:
+                return provider.Reply(None, usage, "no tool call")
+            return provider.Reply({"digest": self.digest}, usage)
         self.requests.append(request)
         if self.replies:
             return self.replies.pop(0)

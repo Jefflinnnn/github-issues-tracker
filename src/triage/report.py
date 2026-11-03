@@ -10,10 +10,12 @@ issue numbers clickable; piped or redirected, it is plain text.
 import dataclasses
 import datetime
 import os
+import textwrap
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import TextIO
 
+from triage.model import digest
 from triage.model import prompt
 from triage.pipeline import load
 from triage.pipeline import run
@@ -187,6 +189,7 @@ class _Summary:
         s = self.style
         lines = [s.bold(self.result.name_with_owner), self._scope(), ""]
         lines += self._tag_table()
+        lines += self._since_last_run()
         lines += self._groups()
         lines += self._footer()
         return "\n".join(lines).rstrip("\n") + "\n"
@@ -196,6 +199,9 @@ class _Summary:
         result = self.result
         scanned = len(self.flagged)
         parts = [f"{max(scanned, result.open_on_github)} open"]
+        change = self._change("open")
+        if change:
+            parts[0] += f" ({change})"
         if self.partial:
             parts.append(
                 f"scanned the newest {scanned} "
@@ -222,17 +228,73 @@ class _Summary:
         untagged = sum(t is None for t in taggings)
         if not rows and not untagged:
             return []
-        lines = ["  " + s.dim(f"{'':<{_TAG_NAME}}{'count':>5}   breakdown")]
+        compare = self._previous() is not None
+        change_header = f"{'change':>8}" if compare else ""
+        lines = [
+            "  "
+            + s.dim(f"{'':<{_TAG_NAME}}{'count':>5}{change_header}   breakdown")
+        ]
         for name, count, breakdown in rows:
-            lines.append(
-                f"  {name:<{_TAG_NAME}}{count:>5}   {breakdown}".rstrip()
-            )
+            change = f"{self._change(name):>8}" if compare else ""
+            row = f"  {name:<{_TAG_NAME}}{count:>5}{change}   {breakdown}"
+            lines.append(row.rstrip())
         if untagged:
             if rows:
-                lines.append(s.dim("  " + "─" * (_TAG_NAME + 5)))
+                lines.append(
+                    s.dim("  " + "─" * (_TAG_NAME + 5 + len(change_header)))
+                )
+            change = f"{self._change('untagged'):>8}" if compare else ""
             lines.append(
-                s.dim(f"  {'not yet tagged':<{_TAG_NAME}}{untagged:>5}")
+                s.dim(
+                    f"  {'not yet tagged':<{_TAG_NAME}}{untagged:>5}{change}"
+                ).rstrip()
             )
+        return lines + [""]
+
+    def _previous(self) -> dict[str, int] | None:
+        since = self.result.since_last_run
+        return since.counts if since else None
+
+    def _change(self, key: str) -> str:
+        """Returns a count's change since the previous run, e.g. ``+2``.
+
+        Empty when it didn't change or there's nothing to compare with.
+        """
+        previous = self._previous()
+        if previous is None or key not in previous:
+            return ""
+        delta = self.result.counts.get(key, 0) - previous[key]
+        return f"{delta:+d}" if delta else ""
+
+    def _since_last_run(self) -> list[str]:
+        """Counts what changed since the previous run, with the digest."""
+        since = self.result.since_last_run
+        if since is None:
+            return []
+        s = self.style
+        counts = [
+            f"{count} {name}"
+            for count, name in (
+                (since.new, "new"),
+                (since.changed, "changed"),
+                (since.closed, "closed"),
+            )
+            if count
+        ]
+        heading = (
+            f"{s.bold('SINCE LAST RUN')} ({digest.ago(since.days)})  "
+            + s.dim(" · ".join(counts) if counts else "nothing changed")
+        )
+        lines = [heading]
+        if since.digest:
+            lines += textwrap.wrap(
+                since.digest,
+                self.width,
+                initial_indent="  ",
+                subsequent_indent="  ",
+            )
+        elif counts and since.skipped:
+            lines.append(s.dim(f"  No digest: {since.skipped}."))
         return lines + [""]
 
     def _breakdown(self, tag: prompt.Tag, mine: list[prompt.Tagging]) -> str:
@@ -497,17 +559,10 @@ class _Summary:
         tagging = self.tagging(item)
         if tagging is None:
             return "untagged", False
-        if tagging.tag is prompt.Tag.BUG:
-            severe = tagging.severity is prompt.Level.HIGH
-            urgent = tagging.priority is prompt.Level.HIGH
-            words = [
-                w for w, on in (("severe", severe), ("urgent", urgent)) if on
-            ]
-            return "bug: " + ", ".join(words) if words else "bug", urgent
-        if tagging.tag is prompt.Tag.FEATURE and tagging.moscow:
-            raised = item.issue.id in self.result.raised
-            return tagging.moscow.value + (" ↑" if raised else ""), False
-        return tagging.tag.value, False
+        words = prompt.describe(tagging)
+        if item.issue.id in self.result.raised:
+            words += " ↑"
+        return words, tagging.priority is prompt.Level.HIGH
 
     def _headline(self, item: transform.FlaggedIssue) -> str:
         found = self.tagging(item)
@@ -558,7 +613,7 @@ class _Summary:
         outcome = self.result.outcome
         parts = [
             f"This run tagged {outcome.tagged}",
-            f"{_dollars(outcome.spent_usd)} of "
+            f"{_dollars(self.result.spent_usd)} of "
             f"{_budget(self.result.budget_usd)}",
         ]
         if outcome.left_for_budget:

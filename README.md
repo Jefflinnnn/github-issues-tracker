@@ -264,7 +264,9 @@ Most issues have none.
 The model reads the title, labels, opening post and the 10 latest
 comments. Along with its tags, it writes a one-sentence summary of what
 the issue is about and a one-sentence reason for the tags. An issue goes
-back to the model only when it changes, so a rerun costs little. Hot
+back to the model only when it changes, so a rerun costs little. When it
+does, triage marks the comments posted since the last run, and the model
+adds a one-sentence change note, which feeds the "since last run" digest. Hot
 issues go to the model first, busiest first, then the rest, newest first,
 so if the budget runs out, what's left untagged is the least pressing.
 
@@ -316,6 +318,28 @@ Read it top down:
   so you can see whether the model puts everything in one bucket. Issues
   not tagged yet sit dimmed below the rule. Spam is counted here and listed
   nowhere.
+- **Since last run** appears from the second run on. Its heading counts
+  the issues opened, changed and closed since the previous run, and the
+  model writes one or two sentences on what matters most among them, such
+  as a fix that failed or a new urgent bug, naming issue numbers. The
+  digest is one extra small request; when the budget left can't cover it,
+  the section says so instead. The tag table also gets a change column,
+  and the open count shows its change:
+
+  ```text
+  941 open (+3)
+
+                  count  change   breakdown
+    bug              15      +2   1 urgent · 2 severe
+    feature          34      -1   2 must · 10 should · 22 could
+
+  SINCE LAST RUN (6 days ago)  4 new · 9 changed · 3 closed
+    The volume fix for #2637 failed again, and #3802 is a new severe bug:
+    Dynamic Island freezes after waking.
+  ```
+
+  With `--limit`, counts also move as more of the backlog gets tagged;
+  the "not yet tagged" row shows that, so the table still adds up.
 - **The groups** list the issues that need a decision, up to 10 each,
   ordered by what it costs to leave an issue alone. An issue fits several
   groups but is listed once, in the first one; later headings say how many

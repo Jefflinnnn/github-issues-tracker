@@ -1,7 +1,8 @@
 """Runs the pipeline for one repository.
 
 Extract, transform and load fetch and store what changed; then the model
-tags every open issue without an up-to-date tag, within the budget.
+tags every open issue without an up-to-date tag, within the budget, and
+sums up what changed since the previous run.
 """
 
 import dataclasses
@@ -13,6 +14,7 @@ from triage import progress
 from triage import repo_ref
 from triage.model import classifier
 from triage.model import demand
+from triage.model import digest
 from triage.model import prompt
 from triage.model import provider
 from triage.pipeline import extract
@@ -20,6 +22,31 @@ from triage.pipeline import load
 from triage.pipeline import transform
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass(frozen=True)
+class SinceLastRun:
+    """What changed since the previous run.
+
+    Attributes:
+        days: Whole days since the previous run started.
+        new: Open issues opened since then.
+        changed: Open issues opened before then and updated since.
+        closed: Issues closed since then.
+        digest: What matters most among the changes, in one or two
+            sentences, or None when it wasn't written.
+        skipped: Why there is no digest; empty when there is one or
+            nothing changed.
+        counts: The previous run's tag counts, or None if it saved none.
+    """
+
+    days: int
+    new: int
+    changed: int
+    closed: int
+    digest: str | None
+    skipped: str
+    counts: dict[str, int] | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -44,8 +71,12 @@ class RunResult:
         raised: IDs of features whose priority the demand floor raised
             above what the model chose.
         model: The model ID that tagged them.
-        outcome: What the model step did this run.
+        outcome: What the tagging step did this run.
         budget_usd: The run's budget.
+        spent_usd: What the run's requests cost, the digest included.
+        counts: This run's tag counts; see :func:`counts`.
+        since_last_run: What changed since the previous run; None on the
+            first run.
     """
 
     name_with_owner: str
@@ -61,6 +92,9 @@ class RunResult:
     model: str
     outcome: classifier.Outcome
     budget_usd: float
+    spent_usd: float
+    counts: dict[str, int]
+    since_last_run: SinceLastRun | None
 
 
 def run(
@@ -118,6 +152,8 @@ def run(
         return show
 
     since = load.last_run_started(connection, repo.full_name)
+    since_time = transform.parse_time(since) if since else None
+    previous_counts = load.last_counts(connection, repo.full_name)
     if limit:
         fetch = "limited"
         extracted = extract.fetch_open_issues(
@@ -168,6 +204,8 @@ def run(
     stored = load.open_issues(connection, name)
 
     current = load.current_tags(connection, name, model.model, prompt.VERSION)
+    # Read before tagging, to see afterwards what changed.
+    previous_tags = load.latest_tags(connection, name)
     fetched_ids = {node["id"] for node in fetched_nodes}
     flagged = transform.flag_issues(stored, now)
     pending = [
@@ -187,15 +225,40 @@ def run(
         load.save_tag(connection, issue, tagging, model.model, prompt.VERSION)
 
     outcome = classifier.classify(
-        pending, model, budget_usd, save, workers, tagging
-    )
-    status.clear()
-    load.finish_run(
-        connection, run_id, model.model, outcome.tagged, outcome.spent_usd
+        pending, model, budget_usd, save, workers, tagging, since_time
     )
     tags, raised = _with_demand_floor(
         load.current_tags(connection, name, model.model, prompt.VERSION),
         stored,
+    )
+    spent = outcome.spent_usd
+    since_last_run = None
+    if since is not None and since_time is not None:
+        status.show("Summing up what changed…")
+        since_last_run, digest_cost = _since_last_run(
+            connection,
+            name,
+            since,
+            since_time,
+            now,
+            flagged,
+            tags,
+            previous_tags,
+            model,
+            budget_usd - spent,
+            previous_counts,
+        )
+        spent += digest_cost
+    status.clear()
+    run_counts = counts(flagged, tags, extracted.total_open)
+    load.finish_run(
+        connection,
+        run_id,
+        model.model,
+        outcome.tagged,
+        spent,
+        run_counts,
+        since_last_run.digest if since_last_run else None,
     )
     return RunResult(
         name_with_owner=name,
@@ -211,6 +274,136 @@ def run(
         model=model.model,
         outcome=outcome,
         budget_usd=budget_usd,
+        spent_usd=spent,
+        counts=run_counts,
+        since_last_run=since_last_run,
+    )
+
+
+def counts(
+    flagged: list[transform.FlaggedIssue],
+    tags: dict[str, prompt.Tagging],
+    open_on_github: int,
+) -> dict[str, int]:
+    """Counts what the summary's tag table shows, to compare across runs.
+
+    Args:
+        flagged: The stored open issues.
+        tags: Their up-to-date taggings.
+        open_on_github: Open issues on GitHub.
+
+    Returns:
+        ``open`` (on GitHub), ``untagged``, and one count per main tag.
+    """
+    result = {"open": open_on_github, "untagged": 0}
+    result |= {tag.value: 0 for tag in prompt.Tag}
+    for item in flagged:
+        found = tags.get(item.issue.id)
+        result[found.tag.value if found else "untagged"] += 1
+    return result
+
+
+def _since_last_run(
+    connection: sqlite3.Connection,
+    name: str,
+    since: str,
+    since_time: datetime.datetime,
+    now: datetime.datetime,
+    flagged: list[transform.FlaggedIssue],
+    tags: dict[str, prompt.Tagging],
+    before: dict[str, prompt.Tagging],
+    model: provider.Provider,
+    budget_left_usd: float,
+    previous_counts: dict[str, int] | None,
+) -> tuple[SinceLastRun, float]:
+    """Finds what changed since the previous run and writes the digest.
+
+    Returns:
+        What changed, and what writing the digest cost.
+    """
+    new, changed = [], []
+    for item in flagged:
+        issue = item.issue
+        tagging = tags.get(issue.id)
+        if tagging is not None and tagging.tag is prompt.Tag.SPAM:
+            continue
+        entry = digest.Item(
+            number=issue.number,
+            label=prompt.describe(tagging) if tagging else "untagged",
+            summary=tagging.summary if tagging else issue.title,
+            activity=item.engagement,
+            note=(tagging.change_note or "") if tagging else "",
+            transition=_transition(before.get(issue.id), tagging),
+        )
+        if issue.created_at >= since_time:
+            new.append((tagging, entry))
+        elif issue.updated_at >= since_time:
+            changed.append((tagging, entry))
+    closed = [
+        digest.Item(number=number, label="", summary=title)
+        for number, title in load.closed_since(connection, name, since)
+    ]
+    changed.sort(key=lambda pair: (not pair[1].transition, -pair[1].activity))
+    new.sort(key=lambda pair: (not _pressing(pair[0]), -pair[1].activity))
+    days = (now - since_time).days
+    if new or changed or closed:
+        written = digest.write(
+            model,
+            digest.request(
+                days,
+                [entry for _, entry in changed],
+                [entry for _, entry in new],
+                closed,
+            ),
+            budget_left_usd,
+        )
+    else:
+        written = digest.Result(None)
+    result = SinceLastRun(
+        days=days,
+        new=len(new),
+        changed=len(changed),
+        closed=len(closed),
+        digest=written.text,
+        skipped=written.skipped,
+        counts=previous_counts,
+    )
+    return result, written.cost_usd
+
+
+def _transition(
+    before: prompt.Tagging | None, after: prompt.Tagging | None
+) -> str:
+    """Says what changed in an issue's tags, e.g. ``fix-released → fix-failed``.
+
+    Returns:
+        The changes, comma-separated; empty when nothing changed.
+    """
+    if before is None or after is None:
+        return ""
+    parts = []
+    if before.tag is not after.tag:
+        parts.append(f"{before.tag.value} → {after.tag.value}")
+    if before.subtag is not after.subtag:
+        old = before.subtag.value if before.subtag else "no subtag"
+        new = after.subtag.value if after.subtag else "no subtag"
+        parts.append(f"{old} → {new}")
+    if (
+        after.priority is prompt.Level.HIGH
+        and before.priority is not prompt.Level.HIGH
+    ):
+        parts.append("now urgent")
+    return ", ".join(parts)
+
+
+def _pressing(tagging: prompt.Tagging | None) -> bool:
+    """Says whether a new issue is an urgent or severe bug or a must-have."""
+    if tagging is None:
+        return False
+    return (
+        tagging.priority is prompt.Level.HIGH
+        or tagging.severity is prompt.Level.HIGH
+        or tagging.moscow is prompt.Moscow.MUST
     )
 
 
