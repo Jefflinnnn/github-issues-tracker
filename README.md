@@ -125,13 +125,15 @@ folder:
 ### Model providers
 
 Pick one in setup; it asks for what that provider needs and shows each
-model's price.
+model's ID and price. For Claude, triage supports only the three 5.5
+models below, since spending limits need each model's price; other
+Claude models, such as Sonnet 4.5, can't be picked.
 
 | Provider | You need | Models |
 | --- | --- | --- |
-| Anthropic API | An API key from https://platform.claude.com | `haiku`, `sonnet`, `opus` |
+| Anthropic API | An API key from https://platform.claude.com | `haiku`, `sonnet`, `opus`: Claude Haiku 5.5, Sonnet 5.5, Opus 5.5 |
 | OpenAI-compatible | An OpenAI key, or a local server such as [Ollama](https://ollama.com), which needs none | Any model the server has |
-| Amazon Bedrock | An AWS access key pair | `haiku`, `sonnet`, `opus` |
+| Amazon Bedrock | An AWS access key pair | `haiku`, `sonnet`, `opus`: Claude Haiku 5.5, Sonnet 5.5, Opus 5.5 |
 
 ### Run a local model with Ollama
 

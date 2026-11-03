@@ -41,8 +41,15 @@ def test_every_model_setup_offers_has_a_price(
     assert model.price.output_per_million > 0
 
 
-def test_the_anthropic_api_offers_haiku_5_5() -> None:
-    assert anthropic_api.MODELS["haiku"].id == "claude-haiku-5-5"
+@pytest.mark.parametrize("models", [anthropic_api.MODELS, bedrock.MODELS])
+def test_every_claude_provider_offers_the_5_5_models(
+    models: dict[str, provider.Model],
+) -> None:
+    assert [model.id.rsplit("claude-", 1)[1] for model in models.values()] == [
+        "haiku-5-5",
+        "sonnet-5-5",
+        "opus-5-5",
+    ]
 
 
 @pytest.mark.parametrize(
