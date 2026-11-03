@@ -251,17 +251,44 @@ def test_subtags_sort_issues_into_their_own_groups(
 
     # Each count is said once: in a group heading, or in the footer.
     assert "FIX DIDN'T WORK (1)" in out
-    # Waiting issues are left to triage browse.
-    assert "waiting" not in out
+    # The footer no longer counts waiting issues.
+    assert "waiting on" not in out
     fix_failed = out.split("FIX DIDN'T WORK")[1].split("\n\n")[0]
     assert "#1 " in fix_failed
-    # A bug someone is already fixing isn't on the to-fix list.
+    # A bug someone is already fixing stays on the list, with its status.
     to_fix = out.split("BUGS TO FIX")[1].split("\n\n")[0]
-    assert "#3 " in to_fix
-    assert "#1 " not in to_fix and "#2 " not in to_fix
+    assert sorted(re.findall(r"^  #(\d+)", to_fix, re.M)) == ["2", "3"]
+    assert "fixing" in to_fix
     closable = out.split("READY TO CLOSE")[1].split("\n\n")[0]
-    # The model's summary replaces the title.
-    assert "Same as #9 [duplicate]" in closable
+    # The model's summary replaces the title; the status says why it's here.
+    assert "duplicate  Same as #9" in closable
+
+
+def test_a_wide_summary_uses_full_labels_and_status_names(
+    isolated: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # No answer for 90 days: ready to close.
+    serve(
+        monkeypatch,
+        FakeGitHub([[issue(1, opened_days_ago=90)]], total_open=1),
+    )
+    model = FakeModel(
+        replies=[reply("question", subtag="needs-info", summary="No answer")]
+    )
+    monkeypatch.setattr(providers, "from_settings", lambda name: model)
+    monkeypatch.setenv("COLUMNS", "120")
+
+    assert cli.main(["summary", "owner/repo"]) == 0
+    out = capsys.readouterr().out
+
+    # Rows fit 100 columns at most, the same layout triage browse uses.
+    assert re.search(r"TAGS +ACTIVITY +IDLE  STATUS +SUMMARY$", out, re.M)
+    assert re.search(
+        r"^  #1      question +0 +\d+d  needs-info +No answer$", out, re.M
+    )
+    assert all(len(line) < 100 for line in out.splitlines())
 
 
 def test_demand_raises_a_feature_to_must_have(
@@ -282,8 +309,10 @@ def test_demand_raises_a_feature_to_must_have(
     assert re.search(
         r"^  feature +20   1 must · 0 should · 19 could$", out, re.M
     )
-    assert "MOST-WANTED FEATURES (1)" in out
-    assert "#20     must-have ↑ " in out
+    # Every feature is listed, must-have first; the summary shows 10.
+    features = out.split("FEATURES (20)")[1].split("\n\n")[0]
+    assert features.splitlines()[1].startswith("  #20    must ↑ ")
+    assert "… and 10 more" in features
 
 
 def test_the_run_line_says_what_the_budget_left_out(
@@ -427,7 +456,7 @@ def test_bug_groups_sort_and_count_what_they_leave_out(
     assert "#5 " not in out
     # A question nobody answered for 30 days is ready to close.
     closable = out.split("READY TO CLOSE")[1].split("\n\n")[0]
-    assert "#6 " in closable and "[needs-info]" in closable
+    assert "#6 " in closable and "needs info" in closable
 
 
 def test_an_empty_bug_group_says_where_the_bugs_went(
@@ -520,7 +549,10 @@ def test_since_last_run_counts_changes_and_writes_a_digest(
     assert cli.main(["summary", "owner/repo", "--workers", "1"]) == 0
     out = capsys.readouterr().out
 
-    assert "SINCE LAST RUN (2 days ago)  1 new · 1 changed · 1 closed" in out
+    heading = (
+        "SINCE LAST RUN (2 days ago)  1 new · 1 closed · 1 with new comments"
+    )
+    assert heading in out
     assert "\n  The fix for #1 failed.\n" in out
     # The changed issue's prompt marks it, and its new comment.
     changed = model.requests[2].user

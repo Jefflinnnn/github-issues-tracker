@@ -1,11 +1,12 @@
 """``triage browse``: look through the last run's issues, one at a time.
 
-The summary lists the same groups, but only their first rows, and counts
-Hot and Stale without listing them. The browser reads the last run back
-from storage, with no fetching and no model requests, and has two levels:
+The summary lists the same groups, but only their first rows. The browser
+reads the last run back from storage, with no fetching and no model
+requests, and has two levels:
 
-- the list: every group, expandable to every issue, Hot and Stale
-  included, with changed issues marked ●;
+- the list: every group, expandable to every issue, with a last group for
+  the issues no other group takes; changed issues are marked ●, and a FLAG
+  column says which are hot or stale;
 - an issue's card: its title, the model's brief on what the issue is and
   the leads so far, then its info: tags one per row with the model's
   reasons, facts worked out from its comments (who spoke last, whether a
@@ -36,13 +37,13 @@ from triage.pipeline import transform
 if TYPE_CHECKING:
     import curses
 
-_FIELD = 12
+# Width of a card's label column; the longest label, Maintainers, has 11
+# characters.
+_FIELD = 14
+# Space between a yes or no and the model's reason for it.
+_GAP = "   "
 _MAINTAINERS = {"OWNER", "MEMBER", "COLLABORATOR"}
 _COPIERS = (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"])
-# Below this width, rows use short labels and status names, so an 80-column
-# window, the default for a new macOS Terminal window, keeps room for the
-# summary.
-WIDE = 100
 # Lines that space and b scroll when the screen size isn't known.
 PAGE = 10
 # Issues an open group shows at once; ] and [ page through the rest.
@@ -50,43 +51,6 @@ GROUP_PAGE = 10
 # Cards wrap at this width, so long text stays readable in a wide window.
 CARD_WIDTH = 100
 
-
-@dataclasses.dataclass(frozen=True)
-class _Columns:
-    """Widths of a list row's columns, and its column header's names."""
-
-    number: int
-    label: int
-    activity: int
-    idle: int
-    status: int
-    activity_name: str
-
-    @property
-    def prefix(self) -> int:
-        """Width of everything before the summary."""
-        return (
-            2
-            + self.number
-            + self.label
-            + self.activity
-            + self.idle
-            + 2
-            + self.status
-        )
-
-
-_WIDE_COLUMNS = _Columns(8, 21, 9, 6, 16, "ACTIVITY")
-_NARROW_COLUMNS = _Columns(7, 9, 5, 5, 11, "ACT")
-# Short status names for narrow rows.
-_SHORT_STATUS = {
-    prompt.Subtag.FIX_FAILED: "failed",
-    prompt.Subtag.FIX_RELEASED: "released",
-    prompt.Subtag.FIX_CONFIRMED: "confirmed",
-    prompt.Subtag.FIX_IN_PROGRESS: "fixing",
-    prompt.Subtag.NEEDS_INFO: "needs info",
-    prompt.Subtag.DUPLICATE: "duplicate",
-}
 
 HELP = {
     "list": (
@@ -144,7 +108,7 @@ class Browser:
         self.opener = opener or open_url
         self.copier = copier or copy_to_clipboard
         self.report = report.Report(
-            result, report.MAX_WIDTH, report.PLAIN, True, True
+            result, report.MAX_WIDTH, report.PLAIN, every_issue=True
         )
         self.groups = [g for g in self.report.groups(None) if g.total]
         # Changes are measured from the run before the last, the same
@@ -168,7 +132,7 @@ class Browser:
 
     # What the screen shows.
 
-    def header(self, width: int = WIDE) -> list[Line]:
+    def header(self, width: int = report.WIDE) -> list[Line]:
         """Returns the fixed lines at the top of the current view.
 
         Args:
@@ -186,7 +150,9 @@ class Browser:
             since = self.since_line()
             if since:
                 lines.append(Line(since))
-            lines.append(Line(self._column_header(width), "bold"))
+            lines.append(
+                Line(self.report.column_header(width, flags=True), "bold")
+            )
             return lines
         group_index, position = self.viewing
         group = self.groups[group_index]
@@ -196,31 +162,15 @@ class Browser:
             f"#{item.issue.number}"
         )
         return [
-            Line(f"{crumb}  ·  {position + 1} of {len(group.issues)}", "bold")
+            Line(f"{crumb}  ({position + 1} of {len(group.issues)})", "bold")
         ]
 
     def since_line(self) -> str:
         """Says what changed since the baseline; empty when nothing did."""
-        if self.since is None:
+        since = self.result.since_last_run
+        if self.since is None or since is None:
             return ""
-        new = sum(
-            item.issue.created_at >= self.since for item in self.result.flagged
-        )
-        commented = len(self.changed) - new
-        closed = (
-            self.result.since_last_run.closed
-            if self.result.since_last_run
-            else 0
-        )
-        parts = [
-            f"{count} {name}"
-            for count, name in (
-                (new, "new"),
-                (closed, "closed"),
-                (commented, "with new comments"),
-            )
-            if count
-        ]
+        parts = report.since_counts(since)
         if not parts:
             return ""
         return f"Since {self._day(self.since)}: " + " · ".join(parts)
@@ -261,7 +211,6 @@ class Browser:
                 )
             ], -1
         self.cursor = min(self.cursor, len(entries) - 1)
-        focused = entries[self.cursor].group
         lines = []
         for entry in entries:
             group = self.groups[entry.group]
@@ -276,17 +225,24 @@ class Browser:
                 )
             elif entry.item is None:
                 arrow = "▾" if entry.group in self.expanded else "▸"
-                # Only the focused group says what puts issues in it.
-                heading = self.report.heading(
-                    group, described=entry.group == focused
-                )
+                # The card's "Why here" says what put an issue in its group.
+                heading = self.report.heading(group, described=False)
                 lines.append(
                     Line(f"{entry.group + 1} {arrow} {heading}", "bold")
                 )
             else:
-                # Red only in "Bugs to fix", for the urgent ones.
-                red = group.title == "BUGS TO FIX"
-                lines.append(self._row(entry.item, width, red))
+                item = entry.item
+                mark = "● " if item.issue.id in self.unread else "  "
+                lines.append(
+                    Line(
+                        self.report.row(
+                            item, group, width, report.PLAIN, mark, flags=True
+                        ),
+                        "accent"
+                        if self.report.is_red(item, group)
+                        else "normal",
+                    )
+                )
         return lines, self.cursor
 
     def entries(self) -> list[_Entry]:
@@ -444,71 +400,14 @@ class Browser:
             copied = self.copier(url)
             self.message = f"Copied {url}" if copied else f"Link: {url}"
 
-    # The list.
-
-    def _column_header(self, width: int) -> str:
-        columns = _columns(width)
-        return (
-            " " * (2 + columns.number)
-            + f"{'TAGS':<{columns.label}}"
-            + f"{columns.activity_name:>{columns.activity}}"
-            + f"{'IDLE':>{columns.idle}}  "
-            + f"{'STATUS':<{columns.status}}SUMMARY"
-        )
-
-    def _row(
-        self, item: transform.FlaggedIssue, width: int, red: bool = False
-    ) -> Line:
-        """One issue's row, with short labels below ``WIDE`` columns.
-
-        With ``red``, an urgent bug's row is in the accent color.
-        """
-        columns = _columns(width)
-        label, urgent = self.report.label(item)
-        subtag = self.report.subtag(item)
-        if columns is _NARROW_COLUMNS:
-            label = self._short_label(item)
-            status = _SHORT_STATUS[subtag] if subtag else ""
-        else:
-            status = subtag.value if subtag else ""
-        mark = "● " if item.issue.id in self.unread else "  "
-        headline = self.report.headline(item)
-        room = max(width - 1 - columns.prefix, 10)
-        if len(headline) > room:
-            headline = headline[: room - 1] + "…"
-        text = (
-            mark
-            + f"{'#' + str(item.issue.number):<{columns.number}}"
-            + f"{label:<{columns.label}}"
-            + f"{item.engagement:>{columns.activity}}"
-            + f"{str(item.idle_days) + 'd':>{columns.idle}}  "
-            + f"{status:<{columns.status}}"
-            + headline
-        )
-        return Line(text, "accent" if red and urgent else "normal")
-
-    def _short_label(self, item: transform.FlaggedIssue) -> str:
-        """Names an issue's tags in one word, for narrow rows.
-
-        A bug reads ``urgent``, ``severe`` or ``bug``, and a feature its
-        MoSCoW word; the card shows the rest.
-        """
-        tagging = self.report.tagging(item)
-        if tagging is None:
-            return "untagged"
-        if tagging.tag is prompt.Tag.BUG:
-            if tagging.priority is prompt.Level.HIGH:
-                return "urgent"
-            return "severe" if tagging.severity is prompt.Level.HIGH else "bug"
-        if tagging.tag is prompt.Tag.FEATURE and tagging.moscow:
-            word = tagging.moscow.value.split("-")[0]
-            return word + (" ↑" if item.issue.id in self.result.raised else "")
-        return str(tagging.tag.value)
-
     # The card.
 
     def _card(self, width: int) -> list[Line]:
-        """One issue: its title, the model's brief, then its info rows."""
+        """One issue: its title, the model's brief, then its info rows.
+
+        Each row holds one fact. A value and the model's reason for it are
+        set apart by spaces, and short lists by commas.
+        """
         group_index, position = self.viewing
         group = self.groups[group_index]
         item = group.issues[position]
@@ -527,8 +426,12 @@ class Browser:
                 label = name if index == 0 else ""
                 lines.append(Line(f"{pad}{label:<{_FIELD}}{part}", kind))
 
+        # Blank lines set the title and summary apart from the
+        # breadcrumb and from each other.
+        lines.append(Line(""))
         field("Title", issue.title, "bold", indent=0)
         if tagging is not None and tagging.brief:
+            lines.append(Line(""))
             field("Summary", tagging.brief, indent=0)
         lines += [Line(""), Line("Info:", "bold")]
         if tagging is None:
@@ -550,17 +453,20 @@ class Browser:
                     "Priority",
                     tagging.moscow.value
                     + (", raised by demand" if raised else "")
-                    + f" · {tagging.rationale}",
+                    + _GAP
+                    + tagging.rationale,
                 )
             else:
                 field("Reason", tagging.rationale)
             if tagging.subtag:
-                field("Status", tagging.subtag.value)
+                field("Status", _words(tagging.subtag))
+        for name, text in self._flags(item):
+            field(name, text)
         opened = issue.created_at
         field("Opened", f"{_ago(self.now - opened)} ({opened:%Y-%m-%d})")
         field(
             "Activity",
-            " · ".join(
+            ", ".join(
                 [
                     _count(issue.reaction_count, "reaction"),
                     _count(transform.comments_by_people(issue), "comment"),
@@ -578,6 +484,37 @@ class Browser:
         field("Why here", self._why(group, item, tagging, facts))
         return lines
 
+    def _flags(self, item: transform.FlaggedIssue) -> list[tuple[str, str]]:
+        """Says why an issue is hot or stale, as card rows.
+
+        An issue both hot and stale gets one row that says both, since
+        "busiest" and "nobody comments" read as a contradiction apart.
+        """
+        hot = transform.Flag.HOT in item.flags
+        stale = transform.Flag.STALE in item.flags and not self.report.partial
+        activity = _count(
+            item.engagement, "reaction and comment", "reactions and comments"
+        )
+        if hot and stale:
+            last = transform.last_human_activity(item.issue).astimezone()
+            when = (
+                f"{last:%B}" if last.year == self.now.year else f"{last:%B %Y}"
+            )
+            return [
+                (
+                    "Hot",
+                    f"{activity} in total, but no comment from a person "
+                    f"since {when}",
+                )
+            ]
+        if hot:
+            return [("Hot", f"among the busiest tenth, {activity}")]
+        if stale:
+            return [
+                ("Stale", f"no comment from a person in {item.idle_days} days")
+            ]
+        return []
+
     def _since_text(
         self, item: transform.FlaggedIssue, tagging: prompt.Tagging | None
     ) -> str:
@@ -585,17 +522,17 @@ class Browser:
         assert self.since is not None
         issue = item.issue
         if issue.created_at >= self.since:
-            parts = ["opened"]
+            done = "opened"
         else:
             new = [
                 c
                 for c in transform.human_comments(issue)
                 if c.created_at >= self.since
             ]
-            parts = [_count(len(new), "new comment")]
+            done = _count(len(new), "new comment")
         if tagging is not None and tagging.change_note:
-            parts.append(tagging.change_note)
-        return " · ".join(parts)
+            return f"{done}. {tagging.change_note}"
+        return done
 
     def _why(
         self,
@@ -607,7 +544,7 @@ class Browser:
         """Says which rule put the issue in its group, from the rule itself."""
         subtag = tagging.subtag if tagging else None
         if group.title == "FIX DIDN'T WORK":
-            return "fix-failed · a released fix, still reported"
+            return "fix failed, a released fix is still reported"
         if group.title == "BUGS TO FIX":
             parts = [
                 word
@@ -623,25 +560,29 @@ class Browser:
                 )
                 if on
             ] or ["bug"]
-            return " · ".join([*parts, "no fix status", facts.maintainers])
-        if group.title == "MOST-WANTED FEATURES":
-            parts = ["must-have"]
+            parts.append(_words(subtag) if subtag else "no fix status")
+            parts.append(facts.reply)
+            return ", ".join(parts)
+        if group.title == "FEATURES":
+            moscow = tagging.moscow if tagging else None
+            parts = [moscow.value if moscow else "feature"]
             if item.issue.id in self.result.raised:
                 parts.append(
                     f"raised by demand ({transform.demand(item.issue)})"
                 )
-            return " · ".join([*parts, "not released or duplicated"])
+            parts.append(
+                _words(subtag) if subtag else "not released or duplicated"
+            )
+            return ", ".join(parts)
         if group.title == "READY TO CLOSE":
             if subtag is prompt.Subtag.FIX_CONFIRMED:
-                return "fix-confirmed · someone says the released fix works"
+                return "fix confirmed, someone says the released fix works"
             if subtag is prompt.Subtag.DUPLICATE:
-                return "duplicate · points to another issue"
-            return f"needs-info · no answer in {item.idle_days} days"
+                return "duplicate, points to another issue"
+            return f"needs info, no answer in {item.idle_days} days"
         if group.title == "ASK TO CONFIRM":
-            return "fix-released · nobody has said it works"
-        if group.title == "HOT":
-            return f"among the busiest tenth · activity {item.engagement}"
-        return f"no comment from a person in {item.idle_days} days"
+            return "fix released, nobody has said it works"
+        return "no group above takes it"
 
     # Helpers.
 
@@ -650,8 +591,8 @@ class Browser:
         if self.since is None:
             return False
         issue = item.issue
-        return issue.created_at >= self.since or any(
-            c.created_at >= self.since for c in transform.human_comments(issue)
+        return issue.created_at >= self.since or transform.commented_since(
+            issue, self.since
         )
 
     def _day(self, moment: datetime.datetime) -> str:
@@ -670,8 +611,10 @@ class _Facts:
         people: Distinct people in the thread, the opener included.
         last: Who commented last and when, e.g. ``7d ago, by the
             reporter``.
-        maintainers: Whether a maintainer replied, e.g. ``no maintainer
-            reply``.
+        maintainers: Whether a maintainer replied, e.g. ``replied 6d
+            ago`` or ``none in the latest 10 comments``.
+        reply: The same in a few words, for "Why here", e.g. ``no
+            maintainer reply``.
     """
 
     def __init__(self, issue: transform.Issue, now: datetime.datetime):
@@ -694,19 +637,25 @@ class _Facts:
         complete = len(issue.comments) >= issue.comment_count
         if replies:
             self.maintainers = f"replied {_ago(now - replies[-1].created_at)}"
-        elif complete:
-            self.maintainers = "no maintainer reply"
+            self.reply = "maintainer replied"
         else:
             self.maintainers = (
-                f"no maintainer reply in the latest {len(issue.comments)} "
-                "comments"
+                "none"
+                if complete
+                else f"none in the latest {len(issue.comments)} comments"
             )
+            self.reply = "no maintainer reply"
 
 
 def _level(high: bool, reason: str | None) -> str:
-    """Returns e.g. ``yes · crashes on every launch``."""
-    answer = "yes" if high else "no"
-    return f"{answer} · {reason}" if reason else answer
+    """Returns e.g. ``yes   Crashes on every launch``."""
+    answer = "yes" if high else "no "
+    return f"{answer}{_GAP}{reason}" if reason else answer.strip()
+
+
+def _words(subtag: prompt.Subtag) -> str:
+    """Returns a subtag in words, e.g. ``fix in progress``."""
+    return subtag.value.replace("-", " ")
 
 
 def _role(comment: transform.Comment, issue: transform.Issue) -> str:
@@ -737,11 +686,6 @@ def _count(number: int, noun: str, plural: str = "") -> str:
 def _page_count(issues: int) -> int:
     """Returns how many pages a group's issues fill."""
     return max(1, -(-issues // GROUP_PAGE))
-
-
-def _columns(width: int) -> _Columns:
-    """Returns the row layout for a screen width."""
-    return _WIDE_COLUMNS if width >= WIDE else _NARROW_COLUMNS
 
 
 def open_url(url: str) -> bool:

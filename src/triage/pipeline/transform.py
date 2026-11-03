@@ -249,6 +249,25 @@ def human_comments(issue: Issue) -> list[Comment]:
     return [comment for comment in issue.comments if not is_bot(comment)]
 
 
+def commented_since(issue: Issue, since: datetime.datetime) -> bool:
+    """Says whether a person commented on an older issue since a time.
+
+    The summary's and the browser's "changed since the last run" both use
+    this, so they always agree.
+
+    Args:
+        issue: The issue.
+        since: The time, usually when the previous run started.
+
+    Returns:
+        Whether the issue was opened before ``since`` and has a fetched
+        comment from a person posted at or after it.
+    """
+    return issue.created_at < since and any(
+        comment.created_at >= since for comment in human_comments(issue)
+    )
+
+
 def comments_by_people(issue: Issue) -> int:
     """Counts an issue's comments from people.
 

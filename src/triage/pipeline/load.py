@@ -12,7 +12,6 @@ import json
 import logging
 import pathlib
 import sqlite3
-from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
 
@@ -21,7 +20,7 @@ from triage.pipeline import transform
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE repos (
@@ -75,8 +74,6 @@ CREATE TABLE runs (
     model           TEXT,
     issues_tagged   INTEGER NOT NULL DEFAULT 0,
     spent_usd       REAL NOT NULL DEFAULT 0,
-    -- The run's tag counts as JSON, so the next run can show what changed.
-    counts_json     TEXT,
     -- The model's "since last run" digest, if it wrote one.
     digest          TEXT
 );
@@ -322,7 +319,6 @@ def finish_run(
     model: str,
     issues_tagged: int,
     spent_usd: float,
-    counts: Mapping[str, int] | None = None,
     digest: str | None = None,
 ) -> None:
     """Records what the model step of a run did.
@@ -333,14 +329,13 @@ def finish_run(
         model: The model ID the run used.
         issues_tagged: Issues the model tagged.
         spent_usd: What the requests cost.
-        counts: The run's tag counts, for the next run to compare with.
         digest: The "since last run" digest, if the model wrote one.
     """
     with connection:
         connection.execute(
             """
             UPDATE runs SET finished_at = ?, model = ?, issues_tagged = ?,
-                            spent_usd = ?, counts_json = ?, digest = ?
+                            spent_usd = ?, digest = ?
             WHERE id = ?
             """,
             (
@@ -348,38 +343,10 @@ def finish_run(
                 model,
                 issues_tagged,
                 spent_usd,
-                json.dumps(dict(counts)) if counts is not None else None,
                 digest,
                 run_id,
             ),
         )
-
-
-def last_counts(
-    connection: sqlite3.Connection, name_with_owner: str
-) -> dict[str, int] | None:
-    """Returns the tag counts the latest finished run saved.
-
-    Args:
-        connection: An open database.
-        name_with_owner: ``owner/name``, in any casing.
-
-    Returns:
-        The counts, or None before any run saved them.
-    """
-    row = connection.execute(
-        """
-        SELECT runs.counts_json FROM runs
-        JOIN repos ON repos.id = runs.repo_id
-        WHERE repos.name_with_owner = ? AND runs.counts_json IS NOT NULL
-        ORDER BY runs.started_at DESC LIMIT 1
-        """,
-        (name_with_owner,),
-    ).fetchone()
-    if row is None:
-        return None
-    counts: dict[str, int] = json.loads(row[0])
-    return counts
 
 
 def save_tag(
@@ -512,20 +479,21 @@ class LastRun:
 
     Attributes:
         name_with_owner: ``owner/name`` with GitHub's casing.
-        url: Link to the repository.
         started_at: When the run started.
         previous_started_at: When the run before it started, or None.
         open_count: Open issues on GitHub at the time.
+        previous_open_count: Open issues on GitHub at the run before it,
+            or None.
         issues_tagged: Issues the model tagged.
         spent_usd: What its requests cost.
         digest: Its "since last run" digest, if it wrote one.
     """
 
     name_with_owner: str
-    url: str
     started_at: datetime.datetime
     previous_started_at: datetime.datetime | None
     open_count: int
+    previous_open_count: int | None
     issues_tagged: int
     spent_usd: float
     digest: str | None
@@ -545,7 +513,7 @@ def last_run(
     """
     rows = connection.execute(
         """
-        SELECT repos.name_with_owner, repos.url, runs.started_at,
+        SELECT repos.name_with_owner, runs.started_at,
                runs.open_count, runs.issues_tagged, runs.spent_usd,
                runs.digest
         FROM runs JOIN repos ON repos.id = runs.repo_id
@@ -556,14 +524,14 @@ def last_run(
     ).fetchall()
     if not rows:
         return None
-    name, url, started, open_count, tagged, spent, digest = rows[0]
-    previous = transform.parse_time(rows[1][2]) if len(rows) > 1 else None
+    name, started, open_count, tagged, spent, digest = rows[0]
+    before = rows[1] if len(rows) > 1 else None
     return LastRun(
         name,
-        url,
         transform.parse_time(started),
-        previous,
+        transform.parse_time(before[1]) if before else None,
         open_count,
+        before[2] if before else None,
         tagged,
         spent,
         digest,

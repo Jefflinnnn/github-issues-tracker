@@ -11,6 +11,7 @@ import dataclasses
 import logging
 from collections.abc import Sequence
 
+from triage import text
 from triage.model import pricing
 from triage.model import provider
 
@@ -170,11 +171,11 @@ def write(
         logger.warning("Couldn't write the digest: %s", error)
         return Result(None, skipped="the request failed")
     cost = pricing.cost(model.price, reply.usage)
-    text = reply.data.get("digest") if reply.data is not None else None
-    if not isinstance(text, str) or not text.strip():
+    written = reply.data.get("digest") if reply.data is not None else None
+    if not isinstance(written, str) or not written.strip():
         logger.debug("Unusable digest reply: %s", reply.problem or reply.data)
         return Result(None, cost, skipped="the model's reply was unusable")
-    return Result(_cut(text.strip(), DIGEST_MAX_CHARS), cost)
+    return Result(text.cut_at_word(written.strip(), DIGEST_MAX_CHARS), cost)
 
 
 def ago(days: int) -> str:
@@ -191,10 +192,3 @@ def ago(days: int) -> str:
     if days == 1:
         return "yesterday"
     return f"{days} days ago"
-
-
-def _cut(text: str, limit: int) -> str:
-    """Cuts text at a word, marking the cut."""
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
