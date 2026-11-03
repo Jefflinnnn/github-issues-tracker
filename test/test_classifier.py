@@ -146,7 +146,13 @@ def test_workers_out_of_range_are_refused() -> None:
 def test_a_bug_needs_severity_and_priority() -> None:
     usage = provider.Usage(1, 1)
     bare = provider.Reply(
-        {"tag": "bug", "summary": "It crashes.", "rationale": "Crash."}, usage
+        {
+            "tag": "bug",
+            "summary": "It crashes.",
+            "brief": "It crashes on start; no lead yet.",
+            "rationale": "Crash.",
+        },
+        usage,
     )
 
     with pytest.raises(classifier.InvalidReplyError, match="severity"):
@@ -202,3 +208,29 @@ def test_a_change_note_is_optional_and_cut_at_a_word() -> None:
     assert classifier.validate(reply("bug")).change_note is None
     assert long.change_note is not None
     assert len(long.change_note) <= prompt.CHANGE_HARD_MAX_CHARS
+
+
+def test_a_reply_needs_a_brief_and_bugs_give_reasons() -> None:
+    usage = provider.Usage(1, 1)
+    no_brief = provider.Reply(
+        {"tag": "docs", "summary": "Typo.", "rationale": "Typo."}, usage
+    )
+    bug = classifier.validate(
+        reply(
+            "bug",
+            severity="high",
+            priority="low",
+            severity_reason="crashes on every launch",
+            priority_reason="one report, workaround exists",
+        )
+    )
+    feature = classifier.validate(
+        reply("feature", severity_reason="crashes on every launch")
+    )
+
+    with pytest.raises(classifier.InvalidReplyError, match="brief"):
+        classifier.validate(no_brief)
+    assert bug.brief == "What it is, and the leads so far."
+    assert bug.severity_reason == "crashes on every launch"
+    assert bug.priority_reason == "one report, workaround exists"
+    assert feature.severity_reason is None

@@ -211,8 +211,9 @@ def test_limit_also_caps_what_the_model_tags(
 
     assert len(model.requests) == 2
     assert "Title: Issue 3" in model.requests[-1].user
-    # One fewer untagged than after the first run.
-    assert re.search(r"^  not yet tagged +1 +-1$", out, re.M)
+    assert re.search(r"^  not yet tagged +1$", out, re.M)
+    # Tagging #3 for the first time is catching up, not a change: no +1.
+    assert re.search(r"^  bug +2$", out, re.M)
     assert "tagged 1 ·" in out
 
 
@@ -252,7 +253,7 @@ def test_subtags_sort_issues_into_their_own_groups(
     fix_failed = out.split("FIX DIDN'T WORK")[1].split("\n\n")[0]
     assert "#1 " in fix_failed
     # A bug someone is already fixing isn't on the to-fix list.
-    to_fix = out.split("BUGS TO FIX FIRST")[1].split("\n\n")[0]
+    to_fix = out.split("BUGS TO FIX")[1].split("\n\n")[0]
     assert "#3 " in to_fix
     assert "#1 " not in to_fix and "#2 " not in to_fix
     closable = out.split("READY TO CLOSE")[1].split("\n\n")[0]
@@ -413,11 +414,11 @@ def test_bug_groups_sort_and_count_what_they_leave_out(
     assert cli.main(["summary", "owner/repo", "--workers", "1"]) == 0
     out = capsys.readouterr().out
 
-    bugs = out.split("BUGS TO FIX FIRST")[1].split("\n\n")[0]
+    bugs = out.split("BUGS TO FIX")[1].split("\n\n")[0]
     numbers = re.findall(r"^  #(\d+)", bugs, re.M)
-    # Severe first, then the busiest: #3, then #2 (5 reactions), then #1.
-    assert numbers == ["3", "2", "1"]
-    assert "+ 1 severe, not urgent" in bugs
+    # Urgent first, severe first among them, then the busiest: #3, #2 (5
+    # reactions), #1; then the severe bug that isn't urgent, #4.
+    assert numbers == ["3", "2", "1", "4"]
     assert re.search(r"^  bug +4   3 urgent · 2 severe$", out, re.M)
     # Spam is counted, never listed.
     assert re.search(r"^  spam +1   not listed$", out, re.M)
@@ -427,7 +428,7 @@ def test_bug_groups_sort_and_count_what_they_leave_out(
     assert "#6 " in closable and "[needs-info]" in closable
 
 
-def test_an_empty_bug_group_says_where_the_urgent_bugs_went(
+def test_an_empty_bug_group_says_where_the_bugs_went(
     isolated: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -438,7 +439,7 @@ def test_an_empty_bug_group_says_where_the_urgent_bugs_went(
             reply(
                 "bug", severity="low", priority="high", subtag="fix-released"
             ),
-            reply("bug", severity="high", priority="low"),
+            reply("feature"),
         ]
     )
     monkeypatch.setattr(providers, "from_settings", lambda name: model)
@@ -446,11 +447,8 @@ def test_an_empty_bug_group_says_where_the_urgent_bugs_went(
     assert cli.main(["summary", "owner/repo", "--workers", "1"]) == 0
     out = capsys.readouterr().out
 
-    assert "BUGS TO FIX FIRST" not in out
-    assert (
-        "No urgent bugs to fix · 1 urgent with a released fix · 1 severe, "
-        "not urgent" in out
-    )
+    assert "BUGS TO FIX" not in out
+    assert "No bugs to fix · 1 bug with a released fix" in out
     # Every row in Ask to confirm is fix-released, so rows don't repeat it.
     assert "[fix-released]" not in out
 
@@ -464,7 +462,8 @@ def test_stale_lists_stale_issues(
         monkeypatch,
         FakeGitHub([[issue(1), issue(2, opened_days_ago=200)]], total_open=2),
     )
-    monkeypatch.setattr(providers, "from_settings", lambda name: FakeModel())
+    model = FakeModel(default=reply("question"))
+    monkeypatch.setattr(providers, "from_settings", lambda name: model)
 
     assert cli.main(["summary", "owner/repo", "--stale"]) == 0
     out = capsys.readouterr().out
@@ -550,7 +549,8 @@ def test_since_last_run_counts_changes_and_writes_a_digest(
     assert "fix-released → fix-failed" in material
     assert "The reporter says the fix in 3.4.3 failed" in material
     # The tag table shows each count's change.
-    assert re.search(r"^  question +", out, re.M) is None
+    # #2 was the only question and it closed; #3 is a new feature.
+    assert re.search(r"^  question +0 +-1$", out, re.M)
     assert re.search(r"^  feature +1 +\+1", out, re.M)
     assert "This run tagged 2 · <$0.01 of $0.50" in out
 

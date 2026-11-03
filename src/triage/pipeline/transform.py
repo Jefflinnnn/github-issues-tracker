@@ -20,6 +20,7 @@ HOT_FRACTION = 0.10
 HOT_MIN_ENGAGEMENT = 3
 
 _BOT = "Bot"
+_BOT_SUFFIXES = ("-bot", "_bot", "[bot]")
 
 
 class Flag(str, enum.Enum):
@@ -212,12 +213,57 @@ def last_human_activity(issue: Issue) -> datetime.datetime:
     Returns:
         The latest human comment's time, or when the issue was opened.
     """
-    human_comments = [
-        comment.created_at
-        for comment in issue.comments
-        if comment.author_type != _BOT
-    ]
-    return max([issue.created_at, *human_comments])
+    return max(
+        [issue.created_at, *(c.created_at for c in human_comments(issue))]
+    )
+
+
+def is_bot(comment: Comment) -> bool:
+    """Says whether a comment comes from a bot.
+
+    GitHub marks apps as bots, but some automation runs as an ordinary
+    account named like one, such as ``astral-automations-bot``; a login
+    ending in ``-bot``, ``_bot`` or ``[bot]`` counts too.
+
+    Args:
+        comment: The comment.
+
+    Returns:
+        Whether a bot wrote it.
+    """
+    if comment.author_type == _BOT:
+        return True
+    login = (comment.author or "").lower()
+    return login.endswith(_BOT_SUFFIXES)
+
+
+def human_comments(issue: Issue) -> list[Comment]:
+    """Returns an issue's fetched comments from people, oldest first.
+
+    Args:
+        issue: The issue.
+
+    Returns:
+        The comments, bots left out.
+    """
+    return [comment for comment in issue.comments if not is_bot(comment)]
+
+
+def comments_by_people(issue: Issue) -> int:
+    """Counts an issue's comments from people.
+
+    GitHub counts every comment; the bot comments among the fetched ones
+    are taken off. Older comments that weren't fetched can't be checked,
+    so a long thread may still count a few bots.
+
+    Args:
+        issue: The issue.
+
+    Returns:
+        The count.
+    """
+    bots = len(issue.comments) - len(human_comments(issue))
+    return max(issue.comment_count - bots, 0)
 
 
 def other_commenters(issue: Issue) -> int:
@@ -234,8 +280,8 @@ def other_commenters(issue: Issue) -> int:
     return len(
         {
             comment.author
-            for comment in issue.comments
-            if comment.author != issue.author and comment.author_type != _BOT
+            for comment in human_comments(issue)
+            if comment.author != issue.author
         }
     )
 
@@ -256,7 +302,7 @@ def demand(issue: Issue) -> int:
 
 
 def engagement(issue: Issue) -> int:
-    """Returns an issue's reactions plus comments.
+    """Returns an issue's reactions plus comments from people.
 
     Args:
         issue: The issue to score.
@@ -264,7 +310,7 @@ def engagement(issue: Issue) -> int:
     Returns:
         The engagement score.
     """
-    return issue.reaction_count + issue.comment_count
+    return issue.reaction_count + comments_by_people(issue)
 
 
 def _hot_threshold(scores: Sequence[int]) -> int:

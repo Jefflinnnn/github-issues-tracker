@@ -134,11 +134,35 @@ def summary(
     Returns:
         The summary, ending with a newline.
     """
-    return _Summary(result, min(width, MAX_WIDTH), style, hot, stale).render()
+    return Report(result, min(width, MAX_WIDTH), style, hot, stale).render()
 
 
-class _Summary:
-    """Builds one summary; split into steps so each stays short."""
+@dataclasses.dataclass(frozen=True)
+class Group:
+    """One group of issues, as the summary and ``triage browse`` list it.
+
+    Attributes:
+        title: e.g. ``FIX DIDN'T WORK``.
+        description: What puts an issue in it, in a few words.
+        issues: Its issues, in order, without those an earlier group
+            lists.
+        total: Every issue that fits it, those listed earlier included.
+        implied: Every issue in it has the same subtag, which the title
+            already names.
+    """
+
+    title: str
+    description: str
+    issues: list[transform.FlaggedIssue]
+    total: int
+    implied: bool
+
+
+class Report:
+    """Builds one summary; split into steps so each stays short.
+
+    ``triage browse`` uses the same groups, rows and labels.
+    """
 
     def __init__(
         self,
@@ -148,6 +172,15 @@ class _Summary:
         list_hot: bool,
         list_stale: bool,
     ):
+        """Prepares the report.
+
+        Args:
+            result: The run to report on.
+            width: Width to fit rows to.
+            style: How to style the text.
+            list_hot: Make Hot a group, not just a count.
+            list_stale: Make Stale a group, not just a count.
+        """
         self.result = result
         self.width = width
         self.style = style
@@ -176,25 +209,29 @@ class _Summary:
         )
 
     def tagging(self, item: transform.FlaggedIssue) -> prompt.Tagging | None:
+        """Returns an issue's up-to-date tagging, or None."""
         return self.result.tags.get(item.issue.id)
 
     def subtag(self, item: transform.FlaggedIssue) -> prompt.Subtag | None:
+        """Returns an issue's subtag, or None."""
         found = self.tagging(item)
         return found.subtag if found else None
 
     def having(self, flag: transform.Flag) -> list[transform.FlaggedIssue]:
+        """Returns the listable issues with a flag."""
         return [item for item in self.listable if flag in item.flags]
 
     def render(self) -> str:
+        """Returns the whole summary."""
         s = self.style
-        lines = [s.bold(self.result.name_with_owner), self._scope(), ""]
+        lines = [s.bold(self.result.name_with_owner), self.scope(), ""]
         lines += self._tag_table()
         lines += self._since_last_run()
         lines += self._groups()
         lines += self._footer()
         return "\n".join(lines).rstrip("\n") + "\n"
 
-    def _scope(self) -> str:
+    def scope(self) -> str:
         """Says what the numbers cover, before any of them."""
         result = self.result
         scanned = len(self.flagged)
@@ -223,8 +260,10 @@ class _Summary:
         rows = []
         for tag in prompt.Tag:
             mine = [t for t in taggings if t is not None and t.tag is tag]
-            if mine:
-                rows.append((tag.value, len(mine), self._breakdown(tag, mine)))
+            # A tag whose last issue closed keeps its row, to show the -1.
+            if mine or self._change(tag.value):
+                breakdown = self._breakdown(tag, mine) if mine else ""
+                rows.append((tag.value, len(mine), breakdown))
         untagged = sum(t is None for t in taggings)
         if not rows and not untagged:
             return []
@@ -243,7 +282,7 @@ class _Summary:
                 lines.append(
                     s.dim("  " + "─" * (_TAG_NAME + 5 + len(change_header)))
                 )
-            change = f"{self._change('untagged'):>8}" if compare else ""
+            change = ""
             lines.append(
                 s.dim(
                     f"  {'not yet tagged':<{_TAG_NAME}}{untagged:>5}{change}"
@@ -258,8 +297,17 @@ class _Summary:
     def _change(self, key: str) -> str:
         """Returns a count's change since the previous run, e.g. ``+2``.
 
-        Empty when it didn't change or there's nothing to compare with.
+        Tags change only through issues opened, closed or tagged
+        differently, not through tagging catching up; the open count
+        changes as GitHub's does. Empty when nothing changed, or there's
+        nothing to compare with.
         """
+        since = self.result.since_last_run
+        if since is None:
+            return ""
+        if key != "open":
+            delta = since.tag_changes.get(key, 0)
+            return f"{delta:+d}" if delta else ""
         previous = self._previous()
         if previous is None or key not in previous:
             return ""
@@ -327,13 +375,21 @@ class _Summary:
             return s.dim("not listed")
         return ""
 
-    def _groups(self) -> list[str]:
-        """Lists issues that need a decision, each once, in its first group.
+    def groups(self, limit: int | None = SECTION_LIMIT) -> list[Group]:
+        """Returns the groups, in order, each issue in its first group.
 
         Groups go from costliest to leave alone to cleanup. Hot and stale
-        issues are listed only when asked for.
+        come last, when asked for.
+
+        Args:
+            limit: How many issues a group lists; an issue counts as listed
+                only if it is among them, so one past the limit can show up
+                in a later group. None lists every issue.
+
+        Returns:
+            Every group, empty ones included.
         """
-        groups = [
+        found = [
             (
                 "FIX DIDN'T WORK",
                 "a released fix, still reported",
@@ -342,7 +398,7 @@ class _Summary:
                     key=lambda i: -i.engagement,
                 ),
             ),
-            ("BUGS TO FIX FIRST", "urgent, severe first", self._urgent_bugs()),
+            ("BUGS TO FIX", "urgent first, then severe", self._bugs_to_fix()),
             (
                 "MOST-WANTED FEATURES",
                 "must-have, most demand first",
@@ -364,32 +420,41 @@ class _Summary:
             ),
         ]
         if self.list_hot:
-            groups.append(
-                ("HOT", "busiest by reactions and comments", self.hot)
-            )
+            found.append(("HOT", "busiest by reactions and comments", self.hot))
         if self.list_stale:
-            groups.append(
+            found.append(
                 (
                     "STALE",
                     f"no comment from a person in {transform.STALE_DAYS} days",
                     self.stale,
                 )
             )
+        result = []
+        listed: set[str] = set()
+        for title, description, items in found:
+            fresh = [item for item in items if item.issue.id not in listed]
+            listed.update(item.issue.id for item in fresh[:limit])
+            result.append(
+                Group(
+                    title, description, fresh, len(items), title in _ONE_SUBTAG
+                )
+            )
+        return result
+
+    def _groups(self) -> list[str]:
+        """Renders the groups that list issues, up to SECTION_LIMIT each."""
         lines: list[str] = []
-        shown: set[str] = set()
         header_shown = False
-        for title, description, items in groups:
-            if title == "BUGS TO FIX FIRST" and not items:
-                lines += [self._no_urgent_bugs(), ""]
+        for group in self.groups():
+            if group.title == "BUGS TO FIX" and not group.total:
+                lines += [self._no_bugs(), ""]
                 continue
-            if not items:
+            if not group.total:
                 continue
             if not header_shown:
                 lines.append(self._column_header())
                 header_shown = True
-            lines += self._group(title, description, items, shown)
-            if title == "BUGS TO FIX FIRST":
-                lines += self._severe_note("  + ")
+            lines += self._group(group)
             lines.append("")
         return lines
 
@@ -419,22 +484,22 @@ class _Summary:
             and found.tag is prompt.Tag.BUG
         ]
 
-    def _urgent_bugs(self) -> list[transform.FlaggedIssue]:
-        """Urgent bugs nobody holds yet.
+    def _bugs_to_fix(self) -> list[transform.FlaggedIssue]:
+        """Bugs nobody holds yet: urgent first, then severe.
 
-        Severe before not; then reactions plus comments, the one input the
+        Within each, reactions plus comments decide, the one input the
         model didn't judge; then the longest idle, so a quiet bug doesn't
         sink.
         """
         bugs = [
             (item, found)
             for item, found in self._bugs()
-            if found.priority is prompt.Level.HIGH
             # Someone already holds it: a fix, the opener or another issue.
-            and found.subtag is None
+            if found.subtag is None
         ]
         bugs.sort(
             key=lambda pair: (
+                pair[1].priority is not prompt.Level.HIGH,
                 pair[1].severity is not prompt.Level.HIGH,
                 -pair[0].engagement,
                 -pair[0].idle_days,
@@ -442,34 +507,21 @@ class _Summary:
         )
         return [item for item, _ in bugs]
 
-    def _no_urgent_bugs(self) -> str:
-        """The line that replaces an empty "Bugs to fix first" group.
+    def _no_bugs(self) -> str:
+        """The line that replaces an empty "Bugs to fix" group.
 
-        It says why the tag table's urgent bugs aren't listed there.
+        It says why the tag table's bugs aren't listed there.
         """
         held: dict[prompt.Subtag, int] = {}
         for _, found in self._bugs():
-            if found.priority is prompt.Level.HIGH and found.subtag:
+            if found.subtag:
                 held[found.subtag] = held.get(found.subtag, 0) + 1
-        parts = ["No urgent bugs to fix"]
+        parts = ["No bugs to fix"]
         parts += [
-            f"{count} urgent {_HELD[subtag]}" for subtag, count in held.items()
+            f"{count} {'bug' if count == 1 else 'bugs'} {_HELD[subtag]}"
+            for subtag, count in held.items()
         ]
-        parts += self._severe_note("")
         return self.style.dim(" · ".join(parts))
-
-    def _severe_note(self, prefix: str) -> list[str]:
-        """Counts severe bugs left out because they aren't urgent."""
-        count = sum(
-            found.severity is prompt.Level.HIGH
-            and found.priority is not prompt.Level.HIGH
-            and found.subtag is None
-            for _, found in self._bugs()
-        )
-        if not count:
-            return []
-        text = f"{prefix}{count} severe, not urgent"
-        return [self.style.dim(text) if prefix else text]
 
     def _wanted(self) -> list[transform.FlaggedIssue]:
         """Must-have features not yet released or duplicated, by demand."""
@@ -484,6 +536,10 @@ class _Summary:
             key=lambda i: -transform.demand(i.issue),
         )
 
+    def column_header(self) -> str:
+        """Returns the dim header row above issue rows."""
+        return self._column_header()
+
     def _column_header(self) -> str:
         indent = " " * (2 + _NUMBER + 1)
         return self.style.dim(
@@ -491,46 +547,72 @@ class _Summary:
             f"{'IDLE':>{_IDLE}}"
         )
 
-    def _group(
-        self,
-        title: str,
-        description: str,
-        items: Sequence[transform.FlaggedIssue],
-        shown: set[str],
-    ) -> list[str]:
-        """Returns a group's heading and rows, skipping issues shown above.
+    def _group(self, group: Group) -> list[str]:
+        """Returns a group's heading and its first rows.
 
         Rows show their subtag, except in a group made of one subtag.
         """
         s = self.style
-        fresh = [item for item in items if item.issue.id not in shown]
-        above = len(items) - len(fresh)
-        if not fresh:
-            count = f"{len(items)}, all listed above"
-        elif above:
-            count = f"{len(items)}, {above} listed above"
-        else:
-            count = str(len(items))
-        heading = (
-            s.accent(title) if title == "FIX DIDN'T WORK" else s.bold(title)
-        )
-        lines = [f"{heading} ({count})  {s.dim(description)}"]
-        # A group made of one subtag says it in its heading.
-        implied = title in _ONE_SUBTAG
-        for item in fresh[:SECTION_LIMIT]:
-            lines.append(self._row(item, not implied))
-            shown.add(item.issue.id)
-        if len(fresh) > SECTION_LIMIT:
-            lines.append(s.dim(f"  … and {len(fresh) - SECTION_LIMIT} more"))
+        lines = [self.heading(group, s)]
+        # Red only in "Bugs to fix", for the urgent ones.
+        red = group.title == "BUGS TO FIX"
+        for item in group.issues[:SECTION_LIMIT]:
+            lines.append(self.row(item, not group.implied, red=red))
+        if len(group.issues) > SECTION_LIMIT:
+            more = len(group.issues) - SECTION_LIMIT
+            lines.append(s.dim(f"  … and {more} more"))
         return lines
 
-    def _row(self, item: transform.FlaggedIssue, with_subtag: bool) -> str:
-        """One issue: number, tags, activity, idle days and summary."""
-        s = self.style
+    def heading(
+        self, group: Group, style: Style | None = None, described: bool = True
+    ) -> str:
+        """Returns a group's heading, e.g. ``HOT (14, 2 listed above)``.
+
+        Args:
+            group: The group.
+            style: How to style it; plain by default.
+            described: Add what puts issues in the group.
+
+        Returns:
+            The heading.
+        """
+        s = style or PLAIN
+        above = group.total - len(group.issues)
+        if not group.issues:
+            count = f"{group.total}, all listed above"
+        elif above:
+            count = f"{group.total}, {above} listed above"
+        else:
+            count = str(group.total)
+        title = s.bold(group.title)
+        heading = f"{title} ({count})"
+        return (
+            f"{heading}  {s.dim(group.description)}" if described else heading
+        )
+
+    def row(
+        self,
+        item: transform.FlaggedIssue,
+        with_subtag: bool,
+        style: Style | None = None,
+        red: bool = False,
+    ) -> str:
+        """One issue: number, tags, activity, idle days and summary.
+
+        Args:
+            item: The issue.
+            with_subtag: End the row with the issue's subtag, if it has one.
+            style: Styling; defaults to the report's.
+            red: Show an urgent bug's label in the accent color.
+
+        Returns:
+            The row, cut to the report's width.
+        """
+        s = style or self.style
         issue = item.issue
         number = f"#{issue.number}"
-        label, urgent = self._label(item)
-        if urgent:
+        label, urgent = self.label(item)
+        if red and urgent:
             styled_label = s.accent(label)
         elif label == "untagged":
             styled_label = s.dim(label)
@@ -538,9 +620,7 @@ class _Summary:
             styled_label = label
         found = self.subtag(item) if with_subtag else None
         suffix = f" [{found.value}]" if found else ""
-        headline = _cut(
-            self._headline(item), self.width - _PREFIX - len(suffix)
-        )
+        headline = _cut(self.headline(item), self.width - _PREFIX - len(suffix))
         return (
             "  "
             + s.link(number, issue.url)
@@ -554,7 +634,7 @@ class _Summary:
             + s.dim(suffix)
         )
 
-    def _label(self, item: transform.FlaggedIssue) -> tuple[str, bool]:
+    def label(self, item: transform.FlaggedIssue) -> tuple[str, bool]:
         """Names an issue's tags in plain words; says if it needs action."""
         tagging = self.tagging(item)
         if tagging is None:
@@ -564,7 +644,8 @@ class _Summary:
             words += " ↑"
         return words, tagging.priority is prompt.Level.HIGH
 
-    def _headline(self, item: transform.FlaggedIssue) -> str:
+    def headline(self, item: transform.FlaggedIssue) -> str:
+        """Returns the model's summary of an issue, or its title."""
         found = self.tagging(item)
         return found.summary if found and found.summary else item.issue.title
 
@@ -611,6 +692,13 @@ class _Summary:
 
     def _this_run(self) -> str:
         outcome = self.result.outcome
+        if self.result.budget_usd is None:
+            started = self.result.ran_at
+            when = f" ({_local(started)})" if started else ""
+            return (
+                f"Last run{when} tagged {outcome.tagged} · "
+                f"{_dollars(self.result.spent_usd)}"
+            )
         parts = [
             f"This run tagged {outcome.tagged}",
             f"{_dollars(self.result.spent_usd)} of "

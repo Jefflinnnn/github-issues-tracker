@@ -42,3 +42,24 @@ def test_hot_is_the_busiest_tenth_with_a_floor() -> None:
 
     assert [n for n, flags in busy.items() if "hot" in flags] == [19, 20]
     assert not any("hot" in flags for flags in quiet.values())
+
+
+def test_bots_are_left_out_of_counts_even_without_the_bot_type() -> None:
+    node = issue(
+        1,
+        reactions=2,
+        comments=[
+            comment("person", 3),
+            comment("astral-automations-bot", 2),
+            comment("dependabot[bot]", 1),
+            comment("stale", 1, author_type="Bot"),
+        ],
+    )
+    parsed = transform.to_issue(node)
+
+    assert [c.author for c in transform.human_comments(parsed)] == ["person"]
+    assert transform.comments_by_people(parsed) == 1
+    assert transform.engagement(parsed) == 3
+    # A login that merely ends in "bot" is a person.
+    talbot = transform.to_issue(issue(2, comments=[comment("talbot", 1)]))
+    assert transform.comments_by_people(talbot) == 1
