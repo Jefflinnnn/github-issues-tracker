@@ -14,6 +14,7 @@ import sqlite3
 import sys
 from collections.abc import Sequence
 
+from triage import browse
 from triage import completion
 from triage import config
 from triage import menu
@@ -54,7 +55,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
-        parser.error("choose a command: setup, summary or list")
+        parser.error("choose a command: setup, summary, browse or list")
     status = progress.Status()
     log = _configure_logging(args.verbose, status)
     if args.command == "completion":
@@ -79,6 +80,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             if args.command == "summary":
                 _summary(args, connection, status, log)
+            elif args.command == "browse":
+                return _browse(args, connection)
             elif args.names:
                 names = [
                     repo.name_with_owner for repo in load.history(connection)
@@ -136,6 +139,34 @@ def _summary(
             stale=args.stale,
         )
     )
+
+
+def _browse(args: argparse.Namespace, connection: sqlite3.Connection) -> int:
+    """Opens the browser on the last run, then prints its summary.
+
+    Without a terminal, or without ``curses``, it prints the summary only.
+    """
+    repo = repo_ref.parse(args.repo)
+    result = run.last_result(connection, repo, _now())
+    if result is None:
+        print(
+            f"triage: error: there's no run on {repo.full_name} yet. Run: "
+            f"triage summary {repo.full_name}",
+            file=sys.stderr,
+        )
+        return 1
+    if sys.stdin.isatty() and sys.stdout.isatty() and browse.supported():
+        try:
+            browse.run(browse.Browser(result, _now()))
+        except KeyboardInterrupt:
+            # Ctrl+C: the screen is already restored; leave without the
+            # summary.
+            return 130
+    width = shutil.get_terminal_size().columns
+    sys.stdout.write(
+        report.summary(result, width, report.Style.for_stream(sys.stdout))
+    )
+    return 0
 
 
 def _now() -> datetime.datetime:
@@ -236,6 +267,21 @@ def _build_parser() -> argparse.ArgumentParser:
             "most the model may spend this run; issues left over are "
             f"tagged next run (default: {DEFAULT_BUDGET_USD:.2f})"
         ),
+    )
+
+    browse_command = commands.add_parser(
+        "browse",
+        help="look through the last run's issues",
+        description=(
+            "Look through what the last triage summary run found, without "
+            "fetching or tagging: expand any group, open one issue to see "
+            "why it's there and its latest comments, open it in the web "
+            "browser or copy its link. Without a terminal, prints the "
+            "summary."
+        ),
+    )
+    browse_command.add_argument(
+        "repo", help="GitHub link, SSH remote or owner/name"
     )
 
     list_command = commands.add_parser(

@@ -1,9 +1,10 @@
 """Shell completion for ``triage``, and turning it on in a startup file.
 
 The scripts complete the commands people use (not ``completion`` itself),
-the repositories you've summarized after ``triage summary``, and the model
-names after ``--model``. They get repository names from ``triage list
---names``, so the history database is the one source.
+the repositories you've summarized after ``triage summary`` and ``triage
+browse``, and the model names after ``--model``. They get repository
+names from ``triage list --names``, so the history database is the one
+source.
 """
 
 import pathlib
@@ -23,7 +24,10 @@ _triage() {
   local IFS=$'\n'
   case $command in
     "")
-      COMPREPLY=($(compgen -W $'setup\nsummary\nlist' -- "$cur")) ;;
+      COMPREPLY=($(compgen -W $'setup\nsummary\nbrowse\nlist' -- "$cur")) ;;
+    browse)
+      COMPREPLY=($(compgen -W "$(triage list --names 2>/dev/null)" -- "$cur"))
+      ;;
     summary)
       case $prev in
         --model)
@@ -55,6 +59,7 @@ _triage() {
   commands=(
     'setup:save your GitHub token, AWS keys and model'
     'summary:fetch a repository'"'"'s issues and summarize them'
+    'browse:look through the last run'"'"'s issues'
     'list:show the repositories you'"'"'ve summarized'
   )
   for (( i = 2; i < CURRENT; i++ )); do
@@ -66,6 +71,9 @@ _triage() {
   case $command in
     "")
       _describe -t commands 'triage command' commands ;;
+    browse)
+      repos=(${(f)"$(triage list --names 2>/dev/null)"})
+      compadd -a repos ;;
     summary)
       case ${words[CURRENT-1]} in
         --model) compadd haiku sonnet opus ;;

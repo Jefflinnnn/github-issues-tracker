@@ -226,7 +226,12 @@ def reply(
     usage = provider.Usage(input_tokens, output_tokens)
     if tag is None:
         return provider.Reply(None, usage, "the model stopped early")
-    data = {"tag": tag, "summary": "What it is about.", "rationale": "Because."}
+    data = {
+        "tag": tag,
+        "summary": "What it is about.",
+        "brief": "What it is, and the leads so far.",
+        "rationale": "Because.",
+    }
     if tag == "bug":
         data |= {"severity": "low", "priority": "low"}
     if tag == "feature":

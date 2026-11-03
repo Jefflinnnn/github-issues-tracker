@@ -38,6 +38,10 @@ class SinceLastRun:
         skipped: Why there is no digest; empty when there is one or
             nothing changed.
         counts: The previous run's tag counts, or None if it saved none.
+        tag_changes: How each main tag's count changed through issues
+            opened, closed or tagged differently since then. Issues tagged
+            for the first time don't count: that's tagging catching up,
+            not the repository changing.
     """
 
     days: int
@@ -47,6 +51,7 @@ class SinceLastRun:
     digest: str | None
     skipped: str
     counts: dict[str, int] | None
+    tag_changes: dict[str, int]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -59,9 +64,10 @@ class RunResult:
         previous_run_at: When the previous run started, or None on the
             first run.
         fetch: How this run fetched: ``all`` (every open issue),
-            ``changes`` (only what changed since the previous run) or
+            ``changes`` (only what changed since the previous run),
             ``limited`` (the most recently updated open issues, plus what
-            changed since the previous run).
+            changed since the previous run) or ``stored`` (nothing; the
+            result was read back from storage).
         limit: The ``--limit`` this run used; 0 for none.
         fetched: Issues fetched this run, open or closed.
         open_on_github: Open issues on GitHub right now.
@@ -72,11 +78,14 @@ class RunResult:
             above what the model chose.
         model: The model ID that tagged them.
         outcome: What the tagging step did this run.
-        budget_usd: The run's budget.
+        budget_usd: The run's budget; None for a result read back from
+            storage, whose budget wasn't kept.
         spent_usd: What the run's requests cost, the digest included.
         counts: This run's tag counts; see :func:`counts`.
         since_last_run: What changed since the previous run; None on the
             first run.
+        ran_at: When the run started, for a result read back from storage;
+            None for a run that just happened.
     """
 
     name_with_owner: str
@@ -91,10 +100,11 @@ class RunResult:
     raised: set[str]
     model: str
     outcome: classifier.Outcome
-    budget_usd: float
+    budget_usd: float | None
     spent_usd: float
     counts: dict[str, int]
     since_last_run: SinceLastRun | None
+    ran_at: datetime.datetime | None = None
 
 
 def run(
@@ -280,6 +290,74 @@ def run(
     )
 
 
+def last_result(
+    connection: sqlite3.Connection,
+    repo: repo_ref.RepoRef,
+    now: datetime.datetime,
+) -> RunResult | None:
+    """Rebuilds the latest run's result from storage, without fetching.
+
+    ``triage browse`` uses it to look through what a run found without
+    running again. Flags are worked out for ``now``; tags are the
+    up-to-date ones, with the demand floor applied.
+
+    Args:
+        connection: An open database.
+        repo: The repository.
+        now: The current time, timezone-aware.
+
+    Returns:
+        The result, or None if the tool hasn't run on the repository.
+    """
+    last = load.last_run(connection, repo.full_name)
+    if last is None:
+        return None
+    name = last.name_with_owner
+    stored = load.open_issues(connection, name)
+    flagged = transform.flag_issues(stored, now)
+    tags, raised = _with_demand_floor(
+        load.latest_tags(connection, name, prompt.VERSION), stored
+    )
+    since_last_run = None
+    if last.previous_started_at is not None:
+        since = last.previous_started_at
+        new = sum(item.issue.created_at >= since for item in flagged)
+        changed = sum(
+            item.issue.created_at < since <= item.issue.updated_at
+            for item in flagged
+        )
+        closed = load.closed_since(connection, name, since)
+        since_last_run = SinceLastRun(
+            days=(last.started_at - since).days,
+            new=new,
+            changed=changed,
+            closed=len(closed),
+            digest=last.digest,
+            skipped="",
+            counts=None,
+            tag_changes={},
+        )
+    return RunResult(
+        name_with_owner=name,
+        url=last.url,
+        previous_run_at=last.previous_started_at,
+        fetch="stored",
+        limit=0,
+        fetched=0,
+        open_on_github=last.open_count,
+        flagged=flagged,
+        tags=tags,
+        raised=raised,
+        model="",
+        outcome=classifier.Outcome(last.issues_tagged, [], 0, last.spent_usd),
+        budget_usd=None,
+        spent_usd=last.spent_usd,
+        counts=counts(flagged, tags, last.open_count),
+        since_last_run=since_last_run,
+        ran_at=last.started_at,
+    )
+
+
 def counts(
     flagged: list[transform.FlaggedIssue],
     tags: dict[str, prompt.Tagging],
@@ -339,10 +417,14 @@ def _since_last_run(
             new.append((tagging, entry))
         elif issue.updated_at >= since_time:
             changed.append((tagging, entry))
+    closed_rows = load.closed_since(connection, name, since)
     closed = [
         digest.Item(number=number, label="", summary=title)
-        for number, title in load.closed_since(connection, name, since)
+        for _, number, title in closed_rows
     ]
+    tag_changes = _tag_changes(
+        flagged, tags, before, since_time, [row[0] for row in closed_rows]
+    )
     changed.sort(key=lambda pair: (not pair[1].transition, -pair[1].activity))
     new.sort(key=lambda pair: (not _pressing(pair[0]), -pair[1].activity))
     days = (now - since_time).days
@@ -367,8 +449,44 @@ def _since_last_run(
         digest=written.text,
         skipped=written.skipped,
         counts=previous_counts,
+        tag_changes=tag_changes,
     )
     return result, written.cost_usd
+
+
+def _tag_changes(
+    flagged: list[transform.FlaggedIssue],
+    tags: dict[str, prompt.Tagging],
+    before: dict[str, prompt.Tagging],
+    since: datetime.datetime,
+    closed_ids: list[str],
+) -> dict[str, int]:
+    """Counts how each main tag changed through the repository's changes.
+
+    A new issue adds to its tag, a closed one takes from the tag it had,
+    and an issue tagged differently moves between tags. An older issue
+    tagged for the first time adds nothing.
+    """
+    changes: dict[str, int] = {}
+
+    def move(tag: prompt.Tag, by: int) -> None:
+        changes[tag.value] = changes.get(tag.value, 0) + by
+
+    for item in flagged:
+        now = tags.get(item.issue.id)
+        if now is None:
+            continue
+        earlier = before.get(item.issue.id)
+        if item.issue.created_at >= since:
+            move(now.tag, 1)
+        elif earlier is not None and earlier.tag is not now.tag:
+            move(earlier.tag, -1)
+            move(now.tag, 1)
+    for issue_id in closed_ids:
+        earlier = before.get(issue_id)
+        if earlier is not None:
+            move(earlier.tag, -1)
+    return {tag: count for tag, count in changes.items() if count}
 
 
 def _transition(

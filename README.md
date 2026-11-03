@@ -5,10 +5,11 @@ open GitHub issues on Monday morning. Point it at a public repository and
 it shows what needs you first. Run it again next week and it shows what
 changed since then.
 
-This version fetches and stores issues, flags them with plain code and
-tags each one with a model from Anthropic, an OpenAI-compatible endpoint
-or Amazon Bedrock. Later pull requests add finer triage of bugs and
-features, an interactive summary and change notes between runs.
+It fetches and stores issues, flags them with plain code, and tags each
+one with a model from Anthropic, an OpenAI-compatible endpoint or Amazon
+Bedrock: what the issue is, how urgent, and what is happening with it.
+The summary groups what needs a decision, and `triage browse` lets you
+look through every issue the last run found, one at a time.
 
 ## Requirements
 
@@ -262,8 +263,11 @@ model judges it from the latest comments:
 Most issues have none.
 
 The model reads the title, labels, opening post and the 10 latest
-comments. Along with its tags, it writes a one-sentence summary of what
-the issue is about and a one-sentence reason for the tags. An issue goes
+comments. Along with its tags, it writes a one-line summary of what the
+issue is about, a brief of one to three sentences on what the issue is
+and the leads so far (a suspected cause, a workaround, a linked pull
+request), a phrase each on why a bug is or isn't severe and urgent, and a
+one-sentence reason for the main tag. An issue goes
 back to the model only when it changes, so a rerun costs little. When it
 does, triage marks the comments posted since the last run, and the model
 adds a one-sentence change note, which feeds the "since last run" digest. Hot
@@ -289,7 +293,9 @@ astral-sh/uv
 FIX DIDN'T WORK (1)  a released fix, still reported
   #16726  bug: severe, urgent         39    9d  Managed Python is killed by Gatekeeper on macOS
 
-No urgent bugs to fix · 1 urgent with a released fix · 1 severe, not urgent
+BUGS TO FIX (2)  urgent first, then severe
+  #21428  bug: urgent                 12    3d  pip sync segfaults now and then on glibc
+  #22941  bug: severe                  4   11d  Install fails behind a corporate proxy
 
 MOST-WANTED FEATURES (1)  must-have, most demand first
   #6830   must-have                   38   18d  Named lockfiles for several resol… [fix-in-progress]
@@ -338,8 +344,10 @@ Read it top down:
     Dynamic Island freezes after waking.
   ```
 
-  With `--limit`, counts also move as more of the backlog gets tagged;
-  the "not yet tagged" row shows that, so the table still adds up.
+  A tag's change counts only what happened on GitHub: issues opened,
+  closed, or tagged differently since the last run. An older issue tagged
+  for the first time, such as one a `--limit` run reaches later, isn't a
+  change.
 - **The groups** list the issues that need a decision, up to 10 each,
   ordered by what it costs to leave an issue alone. An issue fits several
   groups but is listed once, in the first one; later headings say how many
@@ -352,12 +360,12 @@ Read it top down:
 
 The groups:
 
-- **Fix didn't work** (in red): `fix-failed` issues, busiest first.
-- **Bugs to fix first**: urgent bugs, severe first, then by activity, then
-  longest idle. Bugs with a subtag are left out, since a fix, the opener
-  or another issue already holds them. A note counts the severe bugs left
-  out because they aren't urgent. When no bug is left, one line says so
-  and where the urgent bugs went.
+- **Fix didn't work**: `fix-failed` issues, busiest first.
+- **Bugs to fix**: every bug nobody holds yet: urgent ones first (in red),
+  then severe ones, then the rest, each by activity, then longest idle.
+  Bugs with a subtag are left out, since a fix, the opener or another
+  issue already holds them. When no bug is left, one line says so and
+  where the bugs went.
 - **Most-wanted features**: must-have features, by demand, except those
   already released or duplicated.
 - **Ready to close**: `fix-confirmed` and `duplicate` issues, and
@@ -378,11 +386,64 @@ its title. A row ends with its subtag, except in groups where every row
 has the same one. The reason for the tags is stored, not shown. Rows are
 cut to the terminal's width, at most 100 characters.
 
-On a terminal, triage dims labels, marks what needs action (urgent bugs,
-must-have features, Fix didn't work) in red, and makes issue numbers
+On a terminal, triage dims labels, marks urgent bugs and must-have
+features in red, and makes issue numbers
 links you can click, in terminals that support them. Set `NO_COLOR` to
 turn color off. Piped or redirected, the summary is plain text. Warnings
 print above the summary, separated by a blank line.
+
+Look through what the last run found, without fetching or tagging again:
+
+```bash
+triage browse owner/name
+```
+
+It has two levels:
+
+- **The list**: the summary's groups in the same order, Hot and Stale
+  included. An open group shows 10 issues at a time; `]` and `[` page
+  through the rest. A line under the
+  repository name says what changed since the run before the last ("Since
+  Mon: 3 new · 1 closed · 5 with new comments"), and ● marks each issue
+  that is new or has new comments. Opening an issue clears its mark for
+  the session.
+- **An issue's card** (Enter): its title and the model's brief, then
+  **Info**: one row each for its type, severe and urgent (each with the
+  model's reason), priority and status; when it was opened; reactions,
+  comments and people; who commented last; whether a maintainer replied;
+  what changed since the last run; and which rule put it in its group.
+  `o` opens the issue on GitHub.
+
+Bot comments count nowhere: not in comments, activity, people or "last
+commented". triage treats an account as a bot when GitHub marks it as
+one or its login ends in `-bot`, `_bot` or `[bot]`. The model still sees
+bot comments, since release bots are how it knows a fix shipped.
+
+| Key | Does |
+| --- | --- |
+| ↑ / ↓ (or `k` / `j`) | Move, or scroll a line |
+| Space / `b` | Open or close a group; on a card, page down or up |
+| Enter | Show the issue's card |
+| ← (or Esc) | Back |
+| `n` / `p` | Next or previous issue in the group, from a card |
+| `]` / `[` | Next or previous page of an open group |
+| `1`-`9` | Jump to a group |
+| `c` | Jump to the next changed issue |
+| `o` | Open the issue on GitHub |
+| `y` | Copy its link |
+| `q` | Quit, from the list |
+
+The browser fits an 80-column window, the size of a new macOS Terminal
+window: below 100 columns, rows name tags in a word (`urgent`, `must`)
+and statuses in short (`failed`, `fixing`), and the card shows the rest.
+It uses the terminal's own 16 colors, so it follows your profile, light
+or dark; `NO_COLOR` turns color off. It doesn't capture the mouse, so you
+can still select text. Space and `b` page because Page Up and Page Down
+need Fn on a MacBook.
+
+When you quit, triage prints the summary. Without a terminal, or on
+Windows, which lacks `curses`, `triage browse` prints the summary only. It
+makes no requests, so it costs nothing.
 
 Show the repositories you've summarized:
 

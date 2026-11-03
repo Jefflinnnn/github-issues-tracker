@@ -197,10 +197,11 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
     """Checks a reply and returns what the model decided.
 
     A bug must come with a severity and a priority, and a feature with a
-    MoSCoW priority; those fields are dropped for other tags. A subtag is
-    optional for any tag, and so is a change note. A summary, rationale or
-    change note longer than allowed is cut rather than retried: the tags
-    are what matter, and a retry costs a request.
+    MoSCoW priority; those fields, and a bug's reasons for its severity
+    and priority, are dropped for other tags. A subtag is optional for any
+    tag, and so is a change note. A summary, brief and rationale are
+    required. Text longer than allowed is cut rather than retried: the
+    tags are what matter, and a retry costs a request.
 
     Args:
         reply: The provider's reply.
@@ -210,7 +211,7 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
 
     Raises:
         InvalidReplyError: The reply is missing, has an unknown value, lacks
-            a field its tag needs, or has no summary or rationale.
+            a field its tag needs, or has no summary, brief or rationale.
     """
     if reply.data is None:
         raise InvalidReplyError(reply.problem or "no reply")
@@ -224,39 +225,51 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
     if not isinstance(summary, str) or not summary.strip():
         raise InvalidReplyError("the summary is missing")
     summary = _cut_at_word(summary.strip(), prompt.SUMMARY_HARD_MAX_CHARS)
-    change = data.get("change")
-    change_note = (
-        _cut_at_word(change.strip(), prompt.CHANGE_HARD_MAX_CHARS)
-        if isinstance(change, str) and change.strip()
-        else None
-    )
+    brief = data.get("brief")
+    if not isinstance(brief, str) or not brief.strip():
+        raise InvalidReplyError("the brief is missing")
+    brief_text = _cut_at_word(brief.strip(), prompt.BRIEF_HARD_MAX_CHARS)
+    change_note = _optional_text(data, "change", prompt.CHANGE_HARD_MAX_CHARS)
     subtag = (
         _enum(prompt.Subtag, data, "subtag")
         if data.get("subtag") not in (None, "", "none")
         else None
     )
+    tagging = prompt.Tagging(
+        tag,
+        rationale,
+        summary,
+        subtag=subtag,
+        change_note=change_note,
+        brief=brief_text,
+    )
     if tag is prompt.Tag.BUG:
-        return prompt.Tagging(
-            tag,
-            rationale,
-            summary,
+        return dataclasses.replace(
+            tagging,
             severity=_enum(prompt.Level, data, "severity"),
             priority=_enum(prompt.Level, data, "priority"),
-            subtag=subtag,
-            change_note=change_note,
+            severity_reason=_optional_text(
+                data, "severity_reason", prompt.REASON_HARD_MAX_CHARS
+            ),
+            priority_reason=_optional_text(
+                data, "priority_reason", prompt.REASON_HARD_MAX_CHARS
+            ),
         )
     if tag is prompt.Tag.FEATURE:
-        return prompt.Tagging(
-            tag,
-            rationale,
-            summary,
-            moscow=_enum(prompt.Moscow, data, "moscow"),
-            subtag=subtag,
-            change_note=change_note,
+        return dataclasses.replace(
+            tagging, moscow=_enum(prompt.Moscow, data, "moscow")
         )
-    return prompt.Tagging(
-        tag, rationale, summary, subtag=subtag, change_note=change_note
-    )
+    return tagging
+
+
+def _optional_text(
+    data: Mapping[str, Any], field: str, limit: int
+) -> str | None:
+    """Reads an optional text field, cut at a word; None when absent."""
+    value = data.get(field)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return _cut_at_word(value.strip(), limit)
 
 
 def _cut_at_word(text: str, limit: int) -> str:

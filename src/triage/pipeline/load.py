@@ -21,7 +21,7 @@ from triage.pipeline import transform
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE repos (
@@ -104,7 +104,12 @@ CREATE TABLE tags (
     -- What is happening with the issue now, e.g. fix-failed; any tag.
     subtag            TEXT,
     -- What changed since the previous run, for an issue that changed.
-    change_note       TEXT
+    change_note       TEXT,
+    -- What the issue is and the leads so far, in one to three sentences.
+    brief             TEXT NOT NULL,
+    -- Why a bug has its severity and its priority, a phrase each.
+    severity_reason   TEXT,
+    priority_reason   TEXT
 );
 
 CREATE INDEX tags_by_issue ON tags(issue_id);
@@ -399,8 +404,9 @@ def save_tag(
             INSERT INTO tags (issue_id, issue_updated_at, model,
                               prompt_version, tagged_at, tag, rationale,
                               summary, severity, priority, moscow, subtag,
-                              change_note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              change_note, brief, severity_reason,
+                              priority_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 issue.id,
@@ -416,6 +422,9 @@ def save_tag(
                 _value(tagging.moscow),
                 _value(tagging.subtag),
                 tagging.change_note,
+                tagging.brief,
+                tagging.severity_reason,
+                tagging.priority_reason,
             ),
         )
 
@@ -457,67 +466,150 @@ def current_tags(
 
 
 def latest_tags(
-    connection: sqlite3.Connection, name_with_owner: str
+    connection: sqlite3.Connection,
+    name_with_owner: str,
+    prompt_version: str | None = None,
 ) -> dict[str, prompt.Tagging]:
-    """Returns each issue's newest tag, by any model or prompt version.
+    """Returns each issue's newest tag, by any model.
 
-    A run reads these before tagging, to see afterwards what changed.
+    A run reads these before tagging, to see afterwards what changed;
+    ``triage browse`` reads the up-to-date ones to show the last run.
 
     Args:
         connection: An open database.
         name_with_owner: ``owner/name``, in any casing.
+        prompt_version: Only tags from this prompt version, for issues
+            that haven't changed since; None takes every tag.
 
     Returns:
         ``{issue ID: tagging}``.
     """
+    current = (
+        "AND tags.issue_updated_at = issues.updated_at "
+        "AND tags.prompt_version = ?"
+        if prompt_version
+        else ""
+    )
     rows = connection.execute(
         f"""
         SELECT {_TAG_COLUMNS}
         FROM tags
         JOIN issues ON issues.id = tags.issue_id
         JOIN repos ON repos.id = issues.repo_id
-        WHERE repos.name_with_owner = ?
+        WHERE repos.name_with_owner = ? {current}
         ORDER BY tags.id
         """,
-        (name_with_owner,),
+        (name_with_owner, prompt_version)
+        if prompt_version
+        else (name_with_owner,),
     ).fetchall()
     return {row[0]: _tagging(row) for row in rows}
 
 
+@dataclasses.dataclass(frozen=True)
+class LastRun:
+    """The latest run on a repository, as stored.
+
+    Attributes:
+        name_with_owner: ``owner/name`` with GitHub's casing.
+        url: Link to the repository.
+        started_at: When the run started.
+        previous_started_at: When the run before it started, or None.
+        open_count: Open issues on GitHub at the time.
+        issues_tagged: Issues the model tagged.
+        spent_usd: What its requests cost.
+        digest: Its "since last run" digest, if it wrote one.
+    """
+
+    name_with_owner: str
+    url: str
+    started_at: datetime.datetime
+    previous_started_at: datetime.datetime | None
+    open_count: int
+    issues_tagged: int
+    spent_usd: float
+    digest: str | None
+
+
+def last_run(
+    connection: sqlite3.Connection, name_with_owner: str
+) -> LastRun | None:
+    """Returns the latest run on a repository.
+
+    Args:
+        connection: An open database.
+        name_with_owner: ``owner/name``, in any casing.
+
+    Returns:
+        The run, or None if the tool hasn't run on it.
+    """
+    rows = connection.execute(
+        """
+        SELECT repos.name_with_owner, repos.url, runs.started_at,
+               runs.open_count, runs.issues_tagged, runs.spent_usd,
+               runs.digest
+        FROM runs JOIN repos ON repos.id = runs.repo_id
+        WHERE repos.name_with_owner = ?
+        ORDER BY runs.started_at DESC LIMIT 2
+        """,
+        (name_with_owner,),
+    ).fetchall()
+    if not rows:
+        return None
+    name, url, started, open_count, tagged, spent, digest = rows[0]
+    previous = transform.parse_time(rows[1][2]) if len(rows) > 1 else None
+    return LastRun(
+        name,
+        url,
+        transform.parse_time(started),
+        previous,
+        open_count,
+        tagged,
+        spent,
+        digest,
+    )
+
+
 def closed_since(
-    connection: sqlite3.Connection, name_with_owner: str, since: str
-) -> list[tuple[int, str]]:
+    connection: sqlite3.Connection,
+    name_with_owner: str,
+    since: str | datetime.datetime,
+) -> list[tuple[str, int, str]]:
     """Returns the issues closed since a time, most recent first.
 
     Args:
         connection: An open database.
         name_with_owner: ``owner/name``, in any casing.
-        since: ISO 8601 time.
+        since: The time, or its ISO 8601 text.
 
     Returns:
-        ``(number, title)`` for each issue.
+        ``(ID, number, title)`` for each issue.
     """
     rows = connection.execute(
         """
-        SELECT issues.number, issues.title FROM issues
+        SELECT issues.id, issues.number, issues.title FROM issues
         JOIN repos ON repos.id = issues.repo_id
         WHERE repos.name_with_owner = ? AND issues.state = 'CLOSED'
           AND issues.closed_at >= ?
         ORDER BY issues.closed_at DESC
         """,
-        (name_with_owner, since),
+        (name_with_owner, since if isinstance(since, str) else _iso(since)),
     ).fetchall()
-    return [(number, title) for number, title in rows]
+    return [(issue_id, number, title) for issue_id, number, title in rows]
 
 
 _TAG_COLUMNS = """tags.issue_id, tags.tag, tags.rationale, tags.summary,
                tags.severity, tags.priority, tags.moscow, tags.subtag,
-               tags.change_note"""
+               tags.change_note, tags.brief, tags.severity_reason,
+               tags.priority_reason"""
 
 
 def _tagging(row: Sequence[Any]) -> prompt.Tagging:
     """Builds a tagging from a row selected with ``_TAG_COLUMNS``."""
-    _, tag, rationale, summary, severity, priority, moscow, subtag, note = row
+    (_, tag, rationale, summary, severity, priority, moscow, subtag, note) = (
+        row[:9]
+    )
+    brief, severity_reason, priority_reason = row[9:12]
     return prompt.Tagging(
         tag=prompt.Tag(tag),
         rationale=rationale,
@@ -527,6 +619,9 @@ def _tagging(row: Sequence[Any]) -> prompt.Tagging:
         moscow=prompt.Moscow(moscow) if moscow else None,
         subtag=prompt.Subtag(subtag) if subtag else None,
         change_note=note,
+        brief=brief,
+        severity_reason=severity_reason,
+        priority_reason=priority_reason,
     )
 
 
