@@ -63,6 +63,7 @@ This run tagged 2. Used <$0.01 of $0.50 budget.
   - [List past runs](#list-past-runs)
 - [Reading the output](#reading-the-output)
 - [Limits and cost](#limits-and-cost)
+- [Notes](#notes)
 
 ## Requirements
 
@@ -334,3 +335,8 @@ Bot comments aren't counted.
   the retry fails too, the issue stays untagged and the summary names it.
 - **Secrets.** Keys and the token live in `~/.config/triage/.env`, which
   only you can read, or in a git-ignored `.env`; triage never logs them.
+
+## Notes
+
+How I scoped and built this, and how I used an AI assistant:
+[How I thought about this and the AI collaboration log](docs/notes.md).
