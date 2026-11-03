@@ -34,16 +34,23 @@ MAX_WIDTH = 100
 # window, the default for a new macOS Terminal window, keeps room for the
 # summary.
 WIDE = 100
-# Subtags that mean the issue is done or covered elsewhere.
-_DONE = {
-    prompt.Subtag.FIX_RELEASED,
-    prompt.Subtag.FIX_CONFIRMED,
-    prompt.Subtag.DUPLICATE,
+# Subtags that leave an issue in "Bugs to fix" or "Features": someone is on
+# it, or the reporter has been asked. Other subtags have their own group.
+_IN_PROGRESS = {
+    None,
+    prompt.Subtag.FIX_IN_PROGRESS,
+    prompt.Subtag.NEEDS_INFO,
+}
+# Features by MoSCoW priority, must-have first.
+_MOSCOW_ORDER = {
+    prompt.Moscow.MUST: 0,
+    prompt.Moscow.SHOULD: 1,
+    prompt.Moscow.COULD: 2,
 }
 # Groups whose rows all share one subtag.
 _ONE_SUBTAG = {"FIX DIDN'T WORK", "ASK TO CONFIRM"}
-# How an urgent bug that a subtag keeps out of "Bugs to fix first" is
-# described in the line that replaces the empty group.
+# How a bug that a subtag keeps out of "Bugs to fix" is described in the
+# line that replaces the empty group.
 _HELD = {
     prompt.Subtag.FIX_FAILED: "with a failed fix",
     prompt.Subtag.FIX_RELEASED: "with a released fix",
@@ -64,6 +71,7 @@ class Columns:
     label: int
     activity: int
     idle: int
+    flag: int
     status: int
     activity_name: str
 
@@ -73,8 +81,8 @@ class Columns:
         return _WIDE_COLUMNS if width >= WIDE else _NARROW_COLUMNS
 
 
-_WIDE_COLUMNS = Columns(8, 21, 9, 6, 16, "ACTIVITY")
-_NARROW_COLUMNS = Columns(7, 9, 5, 5, 11, "ACT")
+_WIDE_COLUMNS = Columns(8, 21, 9, 6, 7, 16, "ACTIVITY")
+_NARROW_COLUMNS = Columns(7, 9, 5, 5, 6, 11, "ACT")
 # Short status names for narrow rows.
 _SHORT_STATUS = {
     prompt.Subtag.FIX_FAILED: "failed",
@@ -146,8 +154,8 @@ PLAIN = Style()
 def summary(result: run.RunResult, width: int, style: Style = PLAIN) -> str:
     """Returns the Monday summary of a repository's open issues.
 
-    Hot and stale issues are counted, not listed; ``triage browse`` lists
-    them.
+    Each group lists its first issues; ``triage browse`` lists every
+    issue.
 
     Args:
         result: The run to summarize.
@@ -192,7 +200,7 @@ class Report:
         result: run.RunResult,
         width: int,
         style: Style,
-        hot_and_stale: bool = False,
+        every_issue: bool = False,
     ):
         """Prepares the report.
 
@@ -200,13 +208,13 @@ class Report:
             result: The run to report on.
             width: Width to fit rows to.
             style: How to style the text.
-            hot_and_stale: Add Hot and Stale as groups, as ``triage browse``
-                does.
+            every_issue: Add a last group with the issues no other group
+                takes, as ``triage browse`` does, so every issue is listed.
         """
         self.result = result
         self.width = width
         self.style = style
-        self.hot_and_stale = hot_and_stale
+        self.every_issue = every_issue
         self.flagged = result.flagged
         # Spam is counted in the tag table but listed nowhere.
         self.listable = [
@@ -218,16 +226,6 @@ class Report:
         # A partial scan's counts cover only the scanned issues, and
         # staleness isn't shown: the newest issues are rarely stale.
         self.partial = len(self.flagged) < result.open_on_github
-        self.hot = sorted(
-            self.having(transform.Flag.HOT), key=lambda i: -i.engagement
-        )
-        self.stale = (
-            []
-            if self.partial
-            else sorted(
-                self.having(transform.Flag.STALE), key=lambda i: -i.idle_days
-            )
-        )
 
     def tagging(self, item: transform.FlaggedIssue) -> prompt.Tagging | None:
         """Returns an issue's up-to-date tagging, or None."""
@@ -238,9 +236,17 @@ class Report:
         found = self.tagging(item)
         return found.subtag if found else None
 
-    def having(self, flag: transform.Flag) -> list[transform.FlaggedIssue]:
-        """Returns the listable issues with a flag."""
-        return [item for item in self.listable if flag in item.flags]
+    def flag(self, item: transform.FlaggedIssue) -> str:
+        """Returns ``hot`` or ``stale`` for the FLAG column, or empty.
+
+        An issue both hot and stale shows ``hot``; its IDLE column shows
+        it's stale. A partial scan shows no staleness.
+        """
+        if transform.Flag.HOT in item.flags:
+            return "hot"
+        if transform.Flag.STALE in item.flags and not self.partial:
+            return "stale"
+        return ""
 
     def render(self) -> str:
         """Returns the whole summary."""
@@ -386,8 +392,8 @@ class Report:
     def groups(self, limit: int | None = SECTION_LIMIT) -> list[Group]:
         """Returns the groups, in order, each issue in its first group.
 
-        Groups go from costliest to leave alone to cleanup. Hot and stale
-        come last, when asked for.
+        Groups go from costliest to leave alone to cleanup. With
+        ``every_issue``, a last group takes the issues no other group does.
 
         Args:
             limit: How many issues a group lists; an issue counts as listed
@@ -406,11 +412,15 @@ class Report:
                     key=lambda i: -i.engagement,
                 ),
             ),
-            ("BUGS TO FIX", "urgent first, then severe", self._bugs_to_fix()),
             (
-                "MOST-WANTED FEATURES",
-                "must-have, most demand first",
-                self._wanted(),
+                "BUGS TO FIX",
+                "urgent first, then severe",
+                self._bugs_to_fix(),
+            ),
+            (
+                "FEATURES",
+                "must-have, then should, then could; most demand first",
+                self._features(),
             ),
             (
                 "READY TO CLOSE",
@@ -427,14 +437,16 @@ class Report:
                 ),
             ),
         ]
-        if self.hot_and_stale:
-            found.append(("HOT", "busiest by reactions and comments", self.hot))
-        if self.hot_and_stale and not self.partial:
+        if self.every_issue:
+            taken = {item.issue.id for _, _, items in found for item in items}
             found.append(
                 (
-                    "STALE",
-                    f"no comment from a person in {transform.STALE_DAYS} days",
-                    self.stale,
+                    "OTHER ISSUES",
+                    "questions, docs, other, and not yet tagged",
+                    sorted(
+                        (i for i in self.listable if i.issue.id not in taken),
+                        key=lambda i: -i.engagement,
+                    ),
                 )
             )
         result = []
@@ -484,26 +496,42 @@ class Report:
             )
         ]
 
-    def _bugs(self) -> list[tuple[transform.FlaggedIssue, prompt.Tagging]]:
+    def _tagged(
+        self, tag: prompt.Tag
+    ) -> list[tuple[transform.FlaggedIssue, prompt.Tagging]]:
+        """Returns the listable issues with a main tag, with their tagging."""
         return [
             (item, found)
             for item in self.listable
-            if (found := self.tagging(item)) is not None
-            and found.tag is prompt.Tag.BUG
+            if (found := self.tagging(item)) is not None and found.tag is tag
         ]
 
-    def _bugs_to_fix(self) -> list[transform.FlaggedIssue]:
-        """Bugs nobody holds yet: urgent first, then severe.
+    def _in_progress(
+        self, item: transform.FlaggedIssue, found: prompt.Tagging
+    ) -> bool:
+        """Says whether an issue stays with its tag's group.
 
-        Within each, reactions plus comments decide, the one input the
-        model didn't judge; then the longest idle, so a quiet bug doesn't
-        sink.
+        True with no subtag, a fix in progress, or a question to the
+        reporter not yet 30 days old; the other subtags have their own
+        group.
+        """
+        return found.subtag in _IN_PROGRESS and not (
+            found.subtag is prompt.Subtag.NEEDS_INFO
+            and item.idle_days >= NEEDS_INFO_CLOSE_DAYS
+        )
+
+    def _bugs_to_fix(self) -> list[transform.FlaggedIssue]:
+        """Open bugs: urgent first, then severe.
+
+        A bug being fixed or waiting on the reporter sorts like any other;
+        its status says so. Within each, reactions plus comments decide,
+        the one input the model didn't judge; then the longest idle, so a
+        quiet bug doesn't sink.
         """
         bugs = [
             (item, found)
-            for item, found in self._bugs()
-            # Someone already holds it: a fix, the opener or another issue.
-            if found.subtag is None
+            for item, found in self._tagged(prompt.Tag.BUG)
+            if self._in_progress(item, found)
         ]
         bugs.sort(
             key=lambda pair: (
@@ -521,7 +549,7 @@ class Report:
         It says why the tag table's bugs aren't listed there.
         """
         held: dict[prompt.Subtag, int] = {}
-        for _, found in self._bugs():
+        for _, found in self._tagged(prompt.Tag.BUG):
             if found.subtag:
                 held[found.subtag] = held.get(found.subtag, 0) + 1
         parts = ["No bugs to fix"]
@@ -531,34 +559,39 @@ class Report:
         ]
         return self.style.dim(" · ".join(parts))
 
-    def _wanted(self) -> list[transform.FlaggedIssue]:
-        """Must-have features not yet released or duplicated, by demand."""
-        return sorted(
-            (
-                item
-                for item in self.listable
-                if (found := self.tagging(item)) is not None
-                and found.moscow is prompt.Moscow.MUST
-                and found.subtag not in _DONE
-            ),
-            key=lambda i: -transform.demand(i.issue),
+    def _features(self) -> list[transform.FlaggedIssue]:
+        """Open features: must-have, then should, then could, by demand."""
+        features = [
+            (item, found)
+            for item, found in self._tagged(prompt.Tag.FEATURE)
+            if self._in_progress(item, found)
+        ]
+        features.sort(
+            key=lambda pair: (
+                _MOSCOW_ORDER[pair[1].moscow] if pair[1].moscow else 3,
+                -transform.demand(pair[0].issue),
+            )
         )
+        return [item for item, _ in features]
 
-    def column_header(self, width: int) -> str:
+    def column_header(self, width: int, flags: bool = False) -> str:
         """Returns the header row above issue rows, unstyled.
 
         Args:
             width: The width the rows fit, which picks their layout.
+            flags: Include the FLAG column, as ``triage browse`` does.
 
         Returns:
             The header.
         """
         columns = Columns.for_width(width)
+        flag = f"{'FLAG':<{columns.flag}}" if flags else ""
         return (
             " " * (2 + columns.number)
             + f"{'TAGS':<{columns.label}}"
             + f"{columns.activity_name:>{columns.activity}}"
             + f"{'IDLE':>{columns.idle}}  "
+            + flag
             + f"{'STATUS':<{columns.status}}SUMMARY"
         )
 
@@ -576,7 +609,7 @@ class Report:
     def heading(
         self, group: Group, style: Style | None = None, described: bool = True
     ) -> str:
-        """Returns a group's heading, e.g. ``HOT (14, 2 listed above)``.
+        """Returns a group's heading, e.g. ``FEATURES (14, 2 listed above)``.
 
         Args:
             group: The group.
@@ -607,6 +640,7 @@ class Report:
         width: int,
         style: Style | None = None,
         mark: str = "  ",
+        flags: bool = False,
     ) -> str:
         """One issue: number, tags, activity, idle days, status and summary.
 
@@ -621,6 +655,7 @@ class Report:
             style: Styling; defaults to the report's.
             mark: Two characters before the number, e.g. ``● `` for a
                 changed issue.
+            flags: Add the FLAG column: ``hot`` or ``stale``.
 
         Returns:
             The row.
@@ -628,15 +663,14 @@ class Report:
         s = style or self.style
         issue = item.issue
         columns = Columns.for_width(width)
-        label, urgent = self.label(item)
+        label, _ = self.label(item)
         subtag = None if group.implied else self.subtag(item)
         if columns is _NARROW_COLUMNS:
             label = self.short_label(item)
             status = _SHORT_STATUS[subtag] if subtag else ""
         else:
             status = subtag.value if subtag else ""
-        # Red only in "Bugs to fix", for the urgent ones.
-        if group.title == "BUGS TO FIX" and urgent:
+        if self.is_red(item, group):
             styled_label = s.accent(label)
         elif label == "untagged":
             styled_label = s.dim(label)
@@ -648,6 +682,7 @@ class Report:
         rest = (
             f"{item.engagement:>{columns.activity}}"
             + f"{str(item.idle_days) + 'd':>{columns.idle}}  "
+            + (f"{self.flag(item):<{columns.flag}}" if flags else "")
             + f"{status:<{columns.status}}"
         )
         prefix = len(mark + number + number_gap + label + label_gap + rest)

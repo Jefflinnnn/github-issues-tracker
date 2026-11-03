@@ -266,13 +266,15 @@ The model reads the title, labels, opening post and the 10 latest
 comments. Along with its tags, it writes a one-line summary of what the
 issue is about, a brief of one to three sentences on what the issue is
 and the leads so far (a suspected cause, a workaround, a linked pull
-request), a phrase each on why a bug is or isn't severe and urgent, and a
-one-sentence reason for the main tag. An issue goes
-back to the model only when it changes, so a rerun costs little. When it
-does, triage marks the comments posted since the last run, and the model
-adds a one-sentence change note, which feeds the "since last run" digest. Hot
-issues go to the model first, busiest first, then the rest, newest first,
-so if the budget runs out, what's left untagged is the least pressing.
+request), a short reason each (at most 15 words) for why a bug is or
+isn't severe and urgent, and a one-sentence reason for the main tag. The
+prompt asks for plain sentences with no labels, separators or markdown,
+and triage tidies any that slip through. An issue goes back to the model
+only when it changes, so a rerun costs little. When it does, triage marks
+the comments posted since the last run, and the model adds a one-sentence
+change note, which feeds the "since last run" digest. Hot issues go to the
+model first, busiest first, then the rest, newest first, so if the budget
+runs out, what's left untagged is the least pressing.
 
 While it runs, triage shows its progress on one line of the terminal: a
 bar for fetching, then one for tagging. The line disappears when the run
@@ -280,12 +282,12 @@ ends, and the summary follows:
 
 ```text
 astral-sh/uv
-941 open · scanned the newest 15 (2%) · 9 tagged (60%)
+941 open · scanned the newest 20 (2%) · 14 tagged (70%)
 
                 count   breakdown
-  bug               4   2 urgent · 3 severe
-  feature           4   1 must · 1 should · 2 could
-  question          1
+  bug               4   2 urgent · 2 severe
+  feature           7   1 must · 2 should · 4 could
+  question          3
   ───────────────────
   not yet tagged    6
 
@@ -293,12 +295,16 @@ astral-sh/uv
 FIX DIDN'T WORK (1)  a released fix, still reported
   #16726  bug: severe, urgent         39    9d                  Managed Python is killed by Gateke…
 
-BUGS TO FIX (2)  urgent first, then severe
+BUGS TO FIX (3)  urgent first, then severe
   #21428  bug: urgent                 12    3d                  pip sync segfaults now and then on…
   #22941  bug: severe                  4   11d                  Install fails behind a corporate p…
+  #23010  bug                          7    5d  fix-in-progress Wrong Python picked on Windows ARM
 
-MOST-WANTED FEATURES (1)  must-have, most demand first
+FEATURES (4)  must-have, then should, then could; most demand first
   #6830   must-have                   38   18d  fix-in-progress Named lockfiles for several resolu…
+  #8211   should-have                 21   30d                  Show dependency licenses in uv tree
+  #4410   could-have                   9   40d                  Shell completion for script names
+  #9902   could-have                   3    7d  needs-info      Support for custom index headers
 
 READY TO CLOSE (3)  fix confirmed, duplicate, or no answer in 30 days
   #5731   should-have                 14   81d  fix-confirmed   Cache size limit with automatic pr…
@@ -309,7 +315,7 @@ ASK TO CONFIRM (1)  fix released, nobody has confirmed it
   #5190   could-have                  35   45d                  Lock build dependencies of sdists
 
 Run `triage browse` in the terminal to view every issue.
-This run tagged 9. Used $0.01 of $0.50 budget.
+This run tagged 14. Used $0.02 of $0.50 budget.
 6 queued for next run.
 ```
 
@@ -362,24 +368,30 @@ Read it top down:
 The groups:
 
 - **Fix didn't work**: `fix-failed` issues, busiest first.
-- **Bugs to fix**: every bug nobody holds yet: urgent ones first (in red),
-  then severe ones, then the rest, each by activity, then longest idle.
-  Bugs with a subtag are left out, since a fix, the opener or another
-  issue already holds them. When no bug is left, one line says so and
-  where the bugs went.
-- **Most-wanted features**: must-have features, by demand, except those
-  already released or duplicated.
+- **Bugs to fix**: every open bug: urgent ones first (in red), then
+  severe ones, then the rest, each by activity, then longest idle. Bugs
+  being fixed (`fix-in-progress`) or waiting on the reporter (`needs-info`)
+  sort the same way and show their status. When no bug is left, one line
+  says so and where the bugs went.
+- **Features**: every open feature, must-have first, then should-have,
+  then could-have, each by demand. Features being fixed or waiting on the
+  reporter stay here, with their status.
 - **Ready to close**: `fix-confirmed` and `duplicate` issues, and
   `needs-info` issues with no answer in 30 days, idle longest first.
 - **Ask to confirm**: `fix-released` issues nobody has confirmed yet.
 
-Two more groups are listed by `triage browse` only:
+`triage browse` adds **Other issues**: questions, docs, other, and issues
+not tagged yet, busiest first, so it lists every issue.
 
-- **Hot**: among the busiest tenth of open issues by reactions plus
+Hot and stale aren't groups; `triage browse` shows them in a FLAG column,
+so an issue stays in the group of its tag:
+
+- **hot**: among the busiest tenth of open issues by reactions plus
   comments, with at least 3.
-- **Stale**: no comment from a person in 60 days. Bot comments and label
+- **stale**: no comment from a person in 60 days. Bot comments and label
   edits don't count. A partial scan leaves staleness out, since the
-  newest issues are rarely stale.
+  newest issues are rarely stale. An issue both hot and stale shows `hot`;
+  its IDLE column and its card show the rest.
 
 Each row shows the issue number, its tags in words, its activity
 (reactions plus comments), days since a person last commented, its
@@ -406,19 +418,35 @@ triage browse owner/name
 
 It has two levels:
 
-- **The list**: the summary's groups in the same order, Hot and Stale
-  included. An open group shows 10 issues at a time; `]` and `[` page
-  through the rest. A line under the
-  repository name says what changed since the run before the last ("Since
-  Mon: 3 new · 1 closed · 5 with new comments"), and ● marks each issue
-  that is new or has new comments. Opening an issue clears its mark for
+- **The list**: the summary's groups in the same order, then Other issues,
+  with a FLAG column for hot and stale issues. Headings show only the
+  group's name and count; an issue's card says why it's there. An open
+  group shows 10 issues at a time; `]` and `[` page through the rest. A
+  line under the repository name says what changed since the run before
+  the last ("Since Mon: 3 new · 1 closed · 5 with new comments"), and ●
+  marks each issue that is new or has new comments. Opening an issue clears its mark for
   the session.
 - **An issue's card** (Enter): its title and the model's brief, then
-  **Info**: one row each for its type, severe and urgent (each with the
-  model's reason), priority and status; when it was opened; reactions,
-  comments and people; who commented last; whether a maintainer replied;
-  what changed since the last run; and which rule put it in its group.
+  **Info**, one fact per row: its type, severe and urgent (each with the
+  model's reason), priority, status, and why it's hot or stale; when it was
+  opened; reactions, comments and people; who commented last; whether a
+  maintainer replied; what changed since the last run; and which rule put
+  it in its group. An issue both hot and stale gets one row that says both.
   `o` opens the issue on GitHub.
+
+  ```text
+  Info:
+    Type          bug
+    Severe        yes   Severe lag and glitches, plus a crash report
+    Urgent        yes   Many users report the same issue across setups
+    Status        fix in progress
+    Hot           24 reactions and comments in total, but no comment from a person since January
+    Opened        16 months ago (2025-07-09)
+    Activity      2 reactions, 22 comments, 8 people
+    Last          7 months ago, by another user
+    Maintainers   none in the latest 10 comments
+    Why here      urgent, severe, fix in progress, no maintainer reply
+  ```
 
 Bot comments count nowhere: not in comments, activity, people or "last
 commented". triage treats an account as a bot when GitHub marks it as

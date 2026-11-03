@@ -251,14 +251,14 @@ def test_subtags_sort_issues_into_their_own_groups(
 
     # Each count is said once: in a group heading, or in the footer.
     assert "FIX DIDN'T WORK (1)" in out
-    # Waiting issues are left to triage browse.
-    assert "waiting" not in out
+    # The footer no longer counts waiting issues.
+    assert "waiting on" not in out
     fix_failed = out.split("FIX DIDN'T WORK")[1].split("\n\n")[0]
     assert "#1 " in fix_failed
-    # A bug someone is already fixing isn't on the to-fix list.
+    # A bug someone is already fixing stays on the list, with its status.
     to_fix = out.split("BUGS TO FIX")[1].split("\n\n")[0]
-    assert "#3 " in to_fix
-    assert "#1 " not in to_fix and "#2 " not in to_fix
+    assert sorted(re.findall(r"^  #(\d+)", to_fix, re.M)) == ["2", "3"]
+    assert "fixing" in to_fix
     closable = out.split("READY TO CLOSE")[1].split("\n\n")[0]
     # The model's summary replaces the title; the status says why it's here.
     assert "duplicate  Same as #9" in closable
@@ -309,9 +309,10 @@ def test_demand_raises_a_feature_to_must_have(
     assert re.search(
         r"^  feature +20   1 must · 0 should · 19 could$", out, re.M
     )
-    assert "MOST-WANTED FEATURES (1)" in out
-    # Below 100 columns, labels are one word.
-    assert "#20    must ↑ " in out
+    # Every feature is listed, must-have first; the summary shows 10.
+    features = out.split("FEATURES (20)")[1].split("\n\n")[0]
+    assert features.splitlines()[1].startswith("  #20    must ↑ ")
+    assert "… and 10 more" in features
 
 
 def test_the_run_line_says_what_the_budget_left_out(

@@ -218,18 +218,9 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
         raise InvalidReplyError(reply.problem or "no reply")
     data: Mapping[str, Any] = reply.data
     tag = _enum(prompt.Tag, data, "tag")
-    rationale = data.get("rationale")
-    if not isinstance(rationale, str) or not rationale.strip():
-        raise InvalidReplyError("the rationale is missing")
-    rationale = rationale.strip()[: prompt.RATIONALE_MAX_CHARS]
-    summary = data.get("summary")
-    if not isinstance(summary, str) or not summary.strip():
-        raise InvalidReplyError("the summary is missing")
-    summary = text.cut_at_word(summary.strip(), prompt.SUMMARY_HARD_MAX_CHARS)
-    brief = data.get("brief")
-    if not isinstance(brief, str) or not brief.strip():
-        raise InvalidReplyError("the brief is missing")
-    brief_text = text.cut_at_word(brief.strip(), prompt.BRIEF_HARD_MAX_CHARS)
+    rationale = _required_text(data, "rationale", prompt.RATIONALE_MAX_CHARS)
+    summary = _required_text(data, "summary", prompt.SUMMARY_HARD_MAX_CHARS)
+    brief_text = _required_text(data, "brief", prompt.BRIEF_HARD_MAX_CHARS)
     change_note = _optional_text(data, "change", prompt.CHANGE_HARD_MAX_CHARS)
     subtag = (
         _enum(prompt.Subtag, data, "subtag")
@@ -266,11 +257,28 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
 def _optional_text(
     data: Mapping[str, Any], field: str, limit: int
 ) -> str | None:
-    """Reads an optional text field, cut at a word; None when absent."""
+    """Reads an optional text field, tidied and cut at a word.
+
+    Returns:
+        The text, or None when it is absent or empty.
+    """
     value = data.get(field)
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str):
         return None
-    return text.cut_at_word(value.strip(), limit)
+    tidied = text.tidy(value)
+    return text.cut_at_word(tidied, limit) if tidied else None
+
+
+def _required_text(data: Mapping[str, Any], field: str, limit: int) -> str:
+    """Reads a text field every reply needs, tidied and cut at a word.
+
+    Raises:
+        InvalidReplyError: The field is absent or empty.
+    """
+    value = _optional_text(data, field, limit)
+    if value is None:
+        raise InvalidReplyError(f"the {field} is missing")
+    return value
 
 
 _EnumT = TypeVar("_EnumT", bound=enum.Enum)
