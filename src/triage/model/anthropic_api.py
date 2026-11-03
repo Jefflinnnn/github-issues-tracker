@@ -29,9 +29,10 @@ TOOL_NAME = provider.TOOL_NAME
 MAX_RETRIES = 3
 TIMEOUT_S = 60.0
 # Prices from https://platform.claude.com/docs/en/about-claude/pricing,
-# checked 2026-10-31.
+# checked 2026-11-03. Haiku 5.5 costs 5x more for a prompt over 100,000
+# tokens; triage's prompts are far shorter.
 MODELS = {
-    "haiku": provider.Model("claude-haiku-4-5", pricing.Price(1.00, 5.00)),
+    "haiku": provider.Model("claude-haiku-5-5", pricing.Price(0.10, 0.50)),
     "sonnet": provider.Model("claude-sonnet-5-5", pricing.Price(2.00, 10.00)),
     "opus": provider.Model("claude-opus-5-5", pricing.Price(4.00, 20.00)),
 }

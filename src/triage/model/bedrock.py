@@ -33,10 +33,11 @@ DEFAULT_REGION = "us-west-2"
 
 
 # Prices from https://aws.amazon.com/bedrock/pricing/ (Anthropic tab,
-# US West (Oregon)), checked 2026-10-31.
+# US West (Oregon)), checked 2026-10-31. Haiku 5.5 costs 5x more for a
+# prompt over 100,000 tokens; triage's prompts are far shorter.
 MODELS = {
     "haiku": provider.Model(
-        "us.anthropic.claude-haiku-4-5-20251001-v1:0", pricing.Price(1.10, 5.50)
+        "us.anthropic.claude-haiku-5-5", pricing.Price(0.11, 0.55)
     ),
     "sonnet": provider.Model(
         "us.anthropic.claude-sonnet-5-5", pricing.Price(2.20, 11.00)
