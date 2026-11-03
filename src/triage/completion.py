@@ -36,7 +36,6 @@ _triage() {
         *)
           if [[ $cur == -* ]]; then
             local flags=$'--limit\n--model\n--budget-usd\n--workers'
-            flags+=$'\n--hot\n--stale'
             COMPREPLY=($(compgen -W "$flags" -- "$cur"))
           else
             COMPREPLY=($(compgen -W "$(triage list --names 2>/dev/null)" \
@@ -80,7 +79,7 @@ _triage() {
         --limit|--budget-usd|--workers) ;;
         *)
           if [[ ${words[CURRENT]} == -* ]]; then
-            compadd -- --limit --model --budget-usd --workers --hot --stale
+            compadd -- --limit --model --budget-usd --workers
           else
             repos=(${(f)"$(triage list --names 2>/dev/null)"})
             compadd -a repos

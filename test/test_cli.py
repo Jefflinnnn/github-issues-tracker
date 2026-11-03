@@ -48,8 +48,11 @@ def test_summary_then_rerun_then_list(
         r"^  feature +1   0 must · 0 should · 1 could$", first, re.M
     )
     # Hot and stale are counted in a footer, not listed.
-    assert "\n1 hot · 1 stale · --hot / --stale to list\n" in first
-    assert "\nThis run tagged 3 · <$0.01 of $0.50\n" in first
+    assert (
+        "\nRun `triage browse` in the terminal to view every issue.\n"
+        "This run tagged 3. Used <$0.01 of $0.50 budget.\n"
+    ) in first
+    assert "hot" not in first
     assert "Open an issue" not in first
     assert len(model.requests) == 3
 
@@ -77,8 +80,7 @@ def test_summary_then_rerun_then_list(
     assert len(model.requests) == 4
     assert second.startswith("Owner/Repo\n2 open (-1)\n")
     # Zero counts are left out.
-    assert "\n1 hot · --hot to list\n" in second
-    assert "This run tagged 1 ·" in second
+    assert "This run tagged 1. Used" in second
 
     assert cli.main(["list"]) == 0
     assert "Owner/Repo  2" in capsys.readouterr().out
@@ -214,7 +216,7 @@ def test_limit_also_caps_what_the_model_tags(
     assert re.search(r"^  not yet tagged +1$", out, re.M)
     # Tagging #3 for the first time is catching up, not a change: no +1.
     assert re.search(r"^  bug +2$", out, re.M)
-    assert "tagged 1 ·" in out
+    assert "This run tagged 1. Used" in out
 
 
 def test_subtags_sort_issues_into_their_own_groups(
@@ -249,7 +251,8 @@ def test_subtags_sort_issues_into_their_own_groups(
 
     # Each count is said once: in a group heading, or in the footer.
     assert "FIX DIDN'T WORK (1)" in out
-    assert "\n1 waiting on a fix or the reporter\n" in out
+    # Waiting issues are left to triage browse.
+    assert "waiting" not in out
     fix_failed = out.split("FIX DIDN'T WORK")[1].split("\n\n")[0]
     assert "#1 " in fix_failed
     # A bug someone is already fixing isn't on the to-fix list.
@@ -281,7 +284,6 @@ def test_demand_raises_a_feature_to_must_have(
     )
     assert "MOST-WANTED FEATURES (1)" in out
     assert "#20     must-have ↑ " in out
-    assert "↑ raised to match demand" in out
 
 
 def test_the_run_line_says_what_the_budget_left_out(
@@ -299,8 +301,8 @@ def test_the_run_line_says_what_the_budget_left_out(
     captured = capsys.readouterr()
 
     assert (
-        "This run tagged 2 · <$0.01 of $0.003 · 1 queued for next run, hot "
-        "first" in captured.out
+        "This run tagged 2. Used <$0.01 of $0.003 budget.\n"
+        "1 queued for next run.\n" in captured.out
     )
     assert re.search(r"^  not yet tagged +1$", captured.out, re.M)
     # The summary says it, so no warning repeats it.
@@ -320,12 +322,12 @@ def test_each_issue_is_listed_once_in_its_first_group(
     model = FakeModel(default=reply("bug", severity="high", priority="high"))
     monkeypatch.setattr(providers, "from_settings", lambda name: model)
 
-    assert cli.main(["summary", "owner/repo", "--hot"]) == 0
+    assert cli.main(["summary", "owner/repo"]) == 0
     out = capsys.readouterr().out
 
-    # #20 is hot and an urgent bug: listed under bugs only.
+    # #20 is hot and an urgent bug: listed once, under bugs.
     assert out.count("#20 ") == 1
-    assert "HOT (1, all listed above)" in out
+    assert "Run `triage browse` in the terminal" in out
 
 
 def test_a_partial_scan_says_so_and_leaves_out_staleness(
@@ -453,26 +455,6 @@ def test_an_empty_bug_group_says_where_the_bugs_went(
     assert "[fix-released]" not in out
 
 
-def test_stale_lists_stale_issues(
-    isolated: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    serve(
-        monkeypatch,
-        FakeGitHub([[issue(1), issue(2, opened_days_ago=200)]], total_open=2),
-    )
-    model = FakeModel(default=reply("question"))
-    monkeypatch.setattr(providers, "from_settings", lambda name: model)
-
-    assert cli.main(["summary", "owner/repo", "--stale"]) == 0
-    out = capsys.readouterr().out
-
-    stale = out.split("STALE (1)")[1].split("\n\n")[0]
-    assert "#2 " in stale
-    assert "--stale to list" not in out
-
-
 def test_since_last_run_counts_changes_and_writes_a_digest(
     isolated: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -552,7 +534,7 @@ def test_since_last_run_counts_changes_and_writes_a_digest(
     # #2 was the only question and it closed; #3 is a new feature.
     assert re.search(r"^  question +0 +-1$", out, re.M)
     assert re.search(r"^  feature +1 +\+1", out, re.M)
-    assert "This run tagged 2 · <$0.01 of $0.50" in out
+    assert "This run tagged 2. Used <$0.01 of $0.50 budget." in out
 
 
 def test_no_digest_when_the_budget_runs_out(

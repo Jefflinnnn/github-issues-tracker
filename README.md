@@ -308,9 +308,9 @@ READY TO CLOSE (3)  fix confirmed, duplicate, or no answer in 30 days
 ASK TO CONFIRM (1)  fix released, nobody has confirmed it
   #5190   could-have                  35   45d  Lock build dependencies of sdists
 
-2 hot · --hot to list
-2 waiting on a fix or the reporter
-This run tagged 9 · $0.01 of $0.50 · 6 queued for next run, hot first
+Run `triage browse` in the terminal to view every issue.
+This run tagged 9. Used $0.01 of $0.50 budget.
+6 queued for next run.
 ```
 
 Read it top down:
@@ -352,11 +352,10 @@ Read it top down:
   ordered by what it costs to leave an issue alone. An issue fits several
   groups but is listed once, in the first one; later headings say how many
   are listed above. Empty groups are left out.
-- **The footer** holds backlog counts and the run's cost, one dim line
-  each: hot and stale issues (list them with `--hot` and `--stale`),
-  issues waiting on a fix or the reporter, what the model tagged and spent
-  against `--budget-usd`, and how many issues the budget queued for the
-  next run, hot ones first.
+- **The footer** points to `triage browse`, which lists every issue, then
+  says how many issues the model tagged, what that cost against
+  `--budget-usd`, and how many the budget queued for the next run. Hot
+  issues are tagged first, so the queue holds the least pressing ones.
 
 The groups:
 
@@ -371,11 +370,14 @@ The groups:
 - **Ready to close**: `fix-confirmed` and `duplicate` issues, and
   `needs-info` issues with no answer in 30 days, idle longest first.
 - **Ask to confirm**: `fix-released` issues nobody has confirmed yet.
-- **Hot**, with `--hot`: among the busiest tenth of open issues by
-  reactions plus comments, with at least 3.
-- **Stale**, with `--stale`: no comment from a person in 60 days. Bot
-  comments and label edits don't count. A partial scan leaves staleness
-  out, since the newest issues are rarely stale.
+
+Two more groups are listed by `triage browse` only:
+
+- **Hot**: among the busiest tenth of open issues by reactions plus
+  comments, with at least 3.
+- **Stale**: no comment from a person in 60 days. Bot comments and label
+  edits don't count. A partial scan leaves staleness out, since the
+  newest issues are rarely stale.
 
 Each row shows the issue number, its tags in words, its activity
 (reactions plus comments), days since a person last commented, and the
@@ -459,8 +461,6 @@ Options:
 | `--model NAME` (summary) | `TRIAGE_MODEL`, then `haiku` | `haiku`, `sonnet` or `opus` |
 | `--budget-usd USD` (summary) | 0.50 | Most the model may spend this run |
 | `--workers N` (summary) | 4 | Model requests sent at once, 1 to 64 |
-| `--hot` (summary) | off | List hot issues, not just count them |
-| `--stale` (summary) | off | List stale issues, not just count them |
 | `-v` | off | Show debug logs, such as each fetch and unusable reply |
 
 ### Limits
