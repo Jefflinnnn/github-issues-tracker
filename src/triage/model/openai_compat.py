@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 NAME = "openai"
-TOOL_NAME = "tag_issue"
+TOOL_NAME = provider.TOOL_NAME
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 MAX_RETRIES = 3
 TIMEOUT_S = 60.0
@@ -108,8 +108,8 @@ class OpenAICompatibleProvider:
                     {
                         "type": "function",
                         "function": {
-                            "name": TOOL_NAME,
-                            "description": "Record the issue's tag.",
+                            "name": request.tool_name,
+                            "description": request.tool_description,
                             "parameters": dict(request.schema),
                         },
                     }

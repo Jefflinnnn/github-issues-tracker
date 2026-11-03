@@ -12,6 +12,7 @@ import json
 import logging
 import pathlib
 import sqlite3
+from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
 
@@ -20,7 +21,7 @@ from triage.pipeline import transform
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE repos (
@@ -73,7 +74,11 @@ CREATE TABLE runs (
     open_count      INTEGER NOT NULL,
     model           TEXT,
     issues_tagged   INTEGER NOT NULL DEFAULT 0,
-    spent_usd       REAL NOT NULL DEFAULT 0
+    spent_usd       REAL NOT NULL DEFAULT 0,
+    -- The run's tag counts as JSON, so the next run can show what changed.
+    counts_json     TEXT,
+    -- The model's "since last run" digest, if it wrote one.
+    digest          TEXT
 );
 
 CREATE TABLE tags (
@@ -97,7 +102,9 @@ CREATE TABLE tags (
     -- the demand floor); features only.
     moscow            TEXT,
     -- What is happening with the issue now, e.g. fix-failed; any tag.
-    subtag            TEXT
+    subtag            TEXT,
+    -- What changed since the previous run, for an issue that changed.
+    change_note       TEXT
 );
 
 CREATE INDEX tags_by_issue ON tags(issue_id);
@@ -310,6 +317,8 @@ def finish_run(
     model: str,
     issues_tagged: int,
     spent_usd: float,
+    counts: Mapping[str, int] | None = None,
+    digest: str | None = None,
 ) -> None:
     """Records what the model step of a run did.
 
@@ -319,12 +328,14 @@ def finish_run(
         model: The model ID the run used.
         issues_tagged: Issues the model tagged.
         spent_usd: What the requests cost.
+        counts: The run's tag counts, for the next run to compare with.
+        digest: The "since last run" digest, if the model wrote one.
     """
     with connection:
         connection.execute(
             """
             UPDATE runs SET finished_at = ?, model = ?, issues_tagged = ?,
-                            spent_usd = ?
+                            spent_usd = ?, counts_json = ?, digest = ?
             WHERE id = ?
             """,
             (
@@ -332,9 +343,38 @@ def finish_run(
                 model,
                 issues_tagged,
                 spent_usd,
+                json.dumps(dict(counts)) if counts is not None else None,
+                digest,
                 run_id,
             ),
         )
+
+
+def last_counts(
+    connection: sqlite3.Connection, name_with_owner: str
+) -> dict[str, int] | None:
+    """Returns the tag counts the latest finished run saved.
+
+    Args:
+        connection: An open database.
+        name_with_owner: ``owner/name``, in any casing.
+
+    Returns:
+        The counts, or None before any run saved them.
+    """
+    row = connection.execute(
+        """
+        SELECT runs.counts_json FROM runs
+        JOIN repos ON repos.id = runs.repo_id
+        WHERE repos.name_with_owner = ? AND runs.counts_json IS NOT NULL
+        ORDER BY runs.started_at DESC LIMIT 1
+        """,
+        (name_with_owner,),
+    ).fetchone()
+    if row is None:
+        return None
+    counts: dict[str, int] = json.loads(row[0])
+    return counts
 
 
 def save_tag(
@@ -358,8 +398,9 @@ def save_tag(
             """
             INSERT INTO tags (issue_id, issue_updated_at, model,
                               prompt_version, tagged_at, tag, rationale,
-                              summary, severity, priority, moscow, subtag)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              summary, severity, priority, moscow, subtag,
+                              change_note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 issue.id,
@@ -374,6 +415,7 @@ def save_tag(
                 _value(tagging.priority),
                 _value(tagging.moscow),
                 _value(tagging.subtag),
+                tagging.change_note,
             ),
         )
 
@@ -399,10 +441,8 @@ def current_tags(
         ``{issue ID: tagging}``, the newest answer per issue.
     """
     rows = connection.execute(
-        """
-        SELECT tags.issue_id, tags.tag, tags.rationale, tags.summary,
-               tags.severity,
-               tags.priority, tags.moscow, tags.subtag
+        f"""
+        SELECT {_TAG_COLUMNS}
         FROM tags
         JOIN issues ON issues.id = tags.issue_id
         JOIN repos ON repos.id = issues.repo_id
@@ -413,27 +453,81 @@ def current_tags(
         """,
         (name_with_owner, model, prompt_version),
     ).fetchall()
-    return {
-        issue_id: prompt.Tagging(
-            tag=prompt.Tag(tag),
-            rationale=rationale,
-            summary=summary,
-            severity=prompt.Level(severity) if severity else None,
-            priority=prompt.Level(priority) if priority else None,
-            moscow=prompt.Moscow(moscow) if moscow else None,
-            subtag=prompt.Subtag(subtag) if subtag else None,
-        )
-        for (
-            issue_id,
-            tag,
-            rationale,
-            summary,
-            severity,
-            priority,
-            moscow,
-            subtag,
-        ) in rows
-    }
+    return {row[0]: _tagging(row) for row in rows}
+
+
+def latest_tags(
+    connection: sqlite3.Connection, name_with_owner: str
+) -> dict[str, prompt.Tagging]:
+    """Returns each issue's newest tag, by any model or prompt version.
+
+    A run reads these before tagging, to see afterwards what changed.
+
+    Args:
+        connection: An open database.
+        name_with_owner: ``owner/name``, in any casing.
+
+    Returns:
+        ``{issue ID: tagging}``.
+    """
+    rows = connection.execute(
+        f"""
+        SELECT {_TAG_COLUMNS}
+        FROM tags
+        JOIN issues ON issues.id = tags.issue_id
+        JOIN repos ON repos.id = issues.repo_id
+        WHERE repos.name_with_owner = ?
+        ORDER BY tags.id
+        """,
+        (name_with_owner,),
+    ).fetchall()
+    return {row[0]: _tagging(row) for row in rows}
+
+
+def closed_since(
+    connection: sqlite3.Connection, name_with_owner: str, since: str
+) -> list[tuple[int, str]]:
+    """Returns the issues closed since a time, most recent first.
+
+    Args:
+        connection: An open database.
+        name_with_owner: ``owner/name``, in any casing.
+        since: ISO 8601 time.
+
+    Returns:
+        ``(number, title)`` for each issue.
+    """
+    rows = connection.execute(
+        """
+        SELECT issues.number, issues.title FROM issues
+        JOIN repos ON repos.id = issues.repo_id
+        WHERE repos.name_with_owner = ? AND issues.state = 'CLOSED'
+          AND issues.closed_at >= ?
+        ORDER BY issues.closed_at DESC
+        """,
+        (name_with_owner, since),
+    ).fetchall()
+    return [(number, title) for number, title in rows]
+
+
+_TAG_COLUMNS = """tags.issue_id, tags.tag, tags.rationale, tags.summary,
+               tags.severity, tags.priority, tags.moscow, tags.subtag,
+               tags.change_note"""
+
+
+def _tagging(row: Sequence[Any]) -> prompt.Tagging:
+    """Builds a tagging from a row selected with ``_TAG_COLUMNS``."""
+    _, tag, rationale, summary, severity, priority, moscow, subtag, note = row
+    return prompt.Tagging(
+        tag=prompt.Tag(tag),
+        rationale=rationale,
+        summary=summary,
+        severity=prompt.Level(severity) if severity else None,
+        priority=prompt.Level(priority) if priority else None,
+        moscow=prompt.Moscow(moscow) if moscow else None,
+        subtag=prompt.Subtag(subtag) if subtag else None,
+        change_note=note,
+    )
 
 
 def open_issues(

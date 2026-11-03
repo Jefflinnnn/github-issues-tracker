@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 NAME = "anthropic"
-TOOL_NAME = "tag_issue"
+TOOL_NAME = provider.TOOL_NAME
 MAX_RETRIES = 3
 TIMEOUT_S = 60.0
 # Prices from https://platform.claude.com/docs/en/about-claude/pricing,
@@ -99,8 +99,8 @@ class AnthropicProvider:
                 messages=[{"role": "user", "content": request.user}],
                 tools=[
                     {
-                        "name": TOOL_NAME,
-                        "description": "Record the issue's tag.",
+                        "name": request.tool_name,
+                        "description": request.tool_description,
                         "input_schema": dict(request.schema),
                     }
                 ],

@@ -18,6 +18,7 @@ replies arrive, because a SQLite connection can't be shared across threads.
 import collections
 import concurrent.futures
 import dataclasses
+import datetime
 import enum
 import logging
 from collections.abc import Callable
@@ -79,6 +80,7 @@ def classify(
     save: SaveTag,
     workers: int = DEFAULT_WORKERS,
     progress: Progress | None = None,
+    since: datetime.datetime | None = None,
 ) -> Outcome:
     """Tags the issues, several at a time, until done or out of budget.
 
@@ -95,6 +97,8 @@ def classify(
         progress: Called on the calling thread each time an issue is
             tagged or given up on, with how many are finished and the
             total.
+        since: When the last run started, so the prompt can mark what
+            changed; None on a first run.
 
     Returns:
         What the pass did.
@@ -136,7 +140,7 @@ def classify(
         while queue or in_flight:
             while queue and len(in_flight) < workers and affordable():
                 job = queue.popleft()
-                request = prompt.request(job.issue, job.problem)
+                request = prompt.request(job.issue, job.problem, since)
                 in_flight[executor.submit(model.classify, request)] = job
             if not in_flight:
                 break
@@ -194,9 +198,9 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
 
     A bug must come with a severity and a priority, and a feature with a
     MoSCoW priority; those fields are dropped for other tags. A subtag is
-    optional for any tag. A summary or rationale longer than allowed is
-    cut rather than retried: the tags are what matter, and a retry costs a
-    request.
+    optional for any tag, and so is a change note. A summary, rationale or
+    change note longer than allowed is cut rather than retried: the tags
+    are what matter, and a retry costs a request.
 
     Args:
         reply: The provider's reply.
@@ -220,6 +224,12 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
     if not isinstance(summary, str) or not summary.strip():
         raise InvalidReplyError("the summary is missing")
     summary = _cut_at_word(summary.strip(), prompt.SUMMARY_HARD_MAX_CHARS)
+    change = data.get("change")
+    change_note = (
+        _cut_at_word(change.strip(), prompt.CHANGE_HARD_MAX_CHARS)
+        if isinstance(change, str) and change.strip()
+        else None
+    )
     subtag = (
         _enum(prompt.Subtag, data, "subtag")
         if data.get("subtag") not in (None, "", "none")
@@ -233,6 +243,7 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
             severity=_enum(prompt.Level, data, "severity"),
             priority=_enum(prompt.Level, data, "priority"),
             subtag=subtag,
+            change_note=change_note,
         )
     if tag is prompt.Tag.FEATURE:
         return prompt.Tagging(
@@ -241,8 +252,11 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
             summary,
             moscow=_enum(prompt.Moscow, data, "moscow"),
             subtag=subtag,
+            change_note=change_note,
         )
-    return prompt.Tagging(tag, rationale, summary, subtag=subtag)
+    return prompt.Tagging(
+        tag, rationale, summary, subtag=subtag, change_note=change_note
+    )
 
 
 def _cut_at_word(text: str, limit: int) -> str:

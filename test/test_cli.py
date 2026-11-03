@@ -1,7 +1,9 @@
+import datetime
 import pathlib
 import re
 
 import pytest
+from conftest import NOW
 from conftest import FakeGitHub
 from conftest import FakeModel
 from conftest import comment
@@ -73,7 +75,7 @@ def test_summary_then_rerun_then_list(
     second = capsys.readouterr().out
     assert rerun.calls[0][0] == "changed"
     assert len(model.requests) == 4
-    assert second.startswith("Owner/Repo\n2 open\n")
+    assert second.startswith("Owner/Repo\n2 open (-1)\n")
     # Zero counts are left out.
     assert "\n1 hot · --hot to list\n" in second
     assert "This run tagged 1 ·" in second
@@ -125,7 +127,7 @@ def test_a_run_without_limit_fills_in_what_a_limited_run_left_out(
     out = _summary(monkeypatch, capsys, github)
 
     assert [name for name, _ in github.calls] == ["open"]
-    assert out.startswith("Owner/Repo\n2 open\n")
+    assert out.startswith("Owner/Repo\n2 open (-1)\n")
 
 
 def test_limit_on_a_later_run_also_fetches_what_changed(
@@ -148,7 +150,7 @@ def test_limit_on_a_later_run_also_fetches_what_changed(
 
     assert [name for name, _ in github.calls] == ["open", "changed"]
     assert github.calls[0][1]["direction"] == "DESC"
-    assert out.startswith("Owner/Repo\n2 open\n")
+    assert out.startswith("Owner/Repo\n2 open (-1)\n")
 
 
 def test_hot_issues_are_tagged_first(
@@ -209,7 +211,8 @@ def test_limit_also_caps_what_the_model_tags(
 
     assert len(model.requests) == 2
     assert "Title: Issue 3" in model.requests[-1].user
-    assert re.search(r"^  not yet tagged +1$", out, re.M)
+    # One fewer untagged than after the first run.
+    assert re.search(r"^  not yet tagged +1 +-1$", out, re.M)
     assert "tagged 1 ·" in out
 
 
@@ -469,3 +472,114 @@ def test_stale_lists_stale_issues(
     stale = out.split("STALE (1)")[1].split("\n\n")[0]
     assert "#2 " in stale
     assert "--stale to list" not in out
+
+
+def test_since_last_run_counts_changes_and_writes_a_digest(
+    isolated: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Newest first: #2 (opened 8 days ago), then #1.
+    model = FakeModel(
+        replies=[
+            reply("question"),
+            reply(
+                "bug", severity="high", priority="high", subtag="fix-released"
+            ),
+        ],
+        digest="The fix for #1 failed.",
+    )
+    monkeypatch.setattr(providers, "from_settings", lambda name: model)
+    two_days_ago = NOW - datetime.timedelta(days=2)
+    monkeypatch.setattr(cli, "_now", lambda: two_days_ago)
+    serve(
+        monkeypatch,
+        FakeGitHub(
+            [[issue(1, opened_days_ago=9), issue(2, opened_days_ago=8)]],
+            total_open=2,
+        ),
+    )
+    assert cli.main(["summary", "owner/repo", "--workers", "1"]) == 0
+    first = capsys.readouterr().out
+    assert "SINCE LAST RUN" not in first
+    assert model.digest_requests == []
+
+    # Since then: #1 got a comment saying the fix failed, #2 was closed and
+    # #3 was opened.
+    model.replies = [
+        reply(
+            "bug",
+            severity="high",
+            priority="high",
+            subtag="fix-failed",
+            change="The reporter says the fix in 3.4.3 failed",
+        ),
+        reply("feature"),
+    ]
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    serve(
+        monkeypatch,
+        FakeGitHub(
+            [
+                [
+                    # Updated most recently, so it is tagged first.
+                    issue(
+                        1,
+                        opened_days_ago=9,
+                        comments=[comment("opener", 0.5)],
+                        updated_days_ago=0.5,
+                    ),
+                    issue(2, opened_days_ago=8, state="CLOSED"),
+                    issue(3, opened_days_ago=1),
+                ]
+            ],
+            total_open=2,
+        ),
+    )
+    assert cli.main(["summary", "owner/repo", "--workers", "1"]) == 0
+    out = capsys.readouterr().out
+
+    assert "SINCE LAST RUN (2 days ago)  1 new · 1 changed · 1 closed" in out
+    assert "\n  The fix for #1 failed.\n" in out
+    # The changed issue's prompt marks it, and its new comment.
+    changed = model.requests[2].user
+    assert "Changed since the last run: yes" in changed
+    assert "Comment by the opener (new):" in changed
+    # The digest sees the change note and the subtag transition.
+    material = model.digest_requests[0].user
+    assert "fix-released → fix-failed" in material
+    assert "The reporter says the fix in 3.4.3 failed" in material
+    # The tag table shows each count's change.
+    assert re.search(r"^  question +", out, re.M) is None
+    assert re.search(r"^  feature +1 +\+1", out, re.M)
+    assert "This run tagged 2 · <$0.01 of $0.50" in out
+
+
+def test_no_digest_when_the_budget_runs_out(
+    isolated: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    model = FakeModel()
+    monkeypatch.setattr(providers, "from_settings", lambda name: model)
+    monkeypatch.setattr(cli, "_now", lambda: NOW - datetime.timedelta(days=2))
+    serve(
+        monkeypatch, FakeGitHub([[issue(1, opened_days_ago=9)]], total_open=1)
+    )
+    assert cli.main(["summary", "owner/repo"]) == 0
+    capsys.readouterr()
+
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    serve(
+        monkeypatch,
+        FakeGitHub(
+            [[issue(1, opened_days_ago=9), issue(2, opened_days_ago=1)]],
+            total_open=2,
+        ),
+    )
+    assert cli.main(["summary", "owner/repo", "--budget-usd", "0.002"]) == 0
+    out = capsys.readouterr().out
+
+    assert "SINCE LAST RUN (2 days ago)  1 new" in out
+    assert "No digest: the budget ran out." in out
+    assert model.digest_requests == []

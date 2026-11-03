@@ -1,3 +1,6 @@
+import datetime
+
+from conftest import NOW
 from conftest import comment
 from conftest import issue
 
@@ -42,3 +45,22 @@ def test_every_subtag_is_defined_and_in_the_schema() -> None:
         subtag.value for subtag in prompt.Subtag
     ]
     assert "subtag" not in prompt.SCHEMA["required"]
+
+
+def test_an_issue_from_before_the_last_run_is_marked_changed() -> None:
+    node = issue(
+        1,
+        opened_days_ago=9,
+        comments=[comment("maintainer", 5), comment("opener", 1)],
+    )
+    since = NOW - datetime.timedelta(days=2)
+
+    marked = prompt.render(transform.to_issue(node), since)
+    new_issue = prompt.render(
+        transform.to_issue(issue(2, opened_days_ago=1)), since
+    )
+
+    assert "Changed since the last run: yes" in marked
+    assert "Comment by another user:" in marked
+    assert "Comment by the opener (new):" in marked
+    assert "Changed since the last run" not in new_issue

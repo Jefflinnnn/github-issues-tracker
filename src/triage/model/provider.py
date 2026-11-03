@@ -15,22 +15,29 @@ from typing import Protocol
 if TYPE_CHECKING:
     from triage.model import pricing
 
+# The tool a tagging request is answered with.
+TOOL_NAME = "tag_issue"
+
 
 @dataclasses.dataclass(frozen=True)
 class Request:
-    """One classification request.
+    """One request: an issue to tag, or a run to sum up.
 
     Attributes:
         system: Instructions, including the tag definitions.
-        user: One issue, fenced as untrusted data.
+        user: The material, fenced as untrusted data.
         schema: JSON schema the reply must follow.
         max_output_tokens: Upper bound on the reply's length.
+        tool_name: The tool the model answers with.
+        tool_description: What the tool records, as the model sees it.
     """
 
     system: str
     user: str
     schema: Mapping[str, Any]
     max_output_tokens: int
+    tool_name: str = TOOL_NAME
+    tool_description: str = "Record the issue's tag."
 
 
 @dataclasses.dataclass(frozen=True)
