@@ -48,6 +48,8 @@ def _check_token(token: str) -> str:
 def here(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(extract, "check_token", _check_token)
+    # No local model server answers, unless a test says otherwise.
+    monkeypatch.setattr(setup, "installed_models", lambda url: None)
 
 
 def test_bedrock_then_a_rerun_that_keeps_everything(
@@ -122,16 +124,82 @@ def test_a_local_model_gets_the_ollama_url_and_no_cost(
     path = config.user_env_file()
     config.write_env_file({"GITHUB_TOKEN": "good"}, path)
 
-    # Local model, Enter for Ollama's URL, then qwen3:8b.
+    # Local model, Enter for Ollama's URL, then the first suggestion.
     _run(tmp_path, picks=[3, 0], answers=["n", "", "n"], secrets=[""])
 
     assert config.read_env_file(path) == {
         "GITHUB_TOKEN": "good",
         "TRIAGE_PROVIDER": "openai",
         "OPENAI_BASE_URL": setup.OLLAMA_URL,
-        "TRIAGE_MODEL": "qwen3:8b",
+        "TRIAGE_MODEL": "llama3.1:8b",
         "TRIAGE_PRICE_PER_MTOK": "0,0",
     }
+
+
+def test_the_local_menu_lists_the_models_ollama_has(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.write_env_file({"GITHUB_TOKEN": "good"}, config.user_env_file())
+    monkeypatch.setattr(
+        setup, "installed_models", lambda url: ["qwen3:8b", "llama3.1:8b"]
+    )
+    menus: list[list[str]] = []
+    picks = [3, 1]  # A local model, then the second model listed
+
+    def choose(title: str, options: list[str], default: int) -> int:
+        menus.append(options)
+        return picks.pop(0)
+
+    answers = ["n", "", "n"]
+    terminal = setup.Terminal(
+        ask=lambda _: answers.pop(0),
+        ask_secret=lambda _: "",
+        say=lambda _: None,
+        choose=choose,
+    )
+    setup.run(terminal, environ={"SHELL": "/bin/zsh"}, home=tmp_path)
+
+    # What Ollama has comes first, suggested first; a suggestion it lacks
+    # follows, to pull. Thinking models carry a warning.
+    assert menus[1] == [
+        "llama3.1:8b  installed, suggested",
+        "qwen3:8b  installed, thinks first, may not tag",
+        "qwen2.5:14b  pull first: ollama pull qwen2.5:14b, suggested",
+        "Another model (type its name)",
+    ]
+    saved = config.read_env_file(config.user_env_file())
+    assert saved["TRIAGE_MODEL"] == "qwen3:8b"
+
+
+def test_setup_offers_to_comment_out_a_folder_env_that_overrides_it(
+    tmp_path: pathlib.Path,
+) -> None:
+    config.write_env_file({"GITHUB_TOKEN": "good"}, config.user_env_file())
+    folder = tmp_path / ".env"
+    folder.write_text(
+        "AWS_ACCESS_KEY_ID=AKIAEXAMPLE\nTRIAGE_MODEL=sonnet\n",
+        encoding="utf-8",
+    )
+    said: list[str] = []
+    picks = [3, 0]
+    # Completion, Enter for Ollama's URL, yes to comment out, no test.
+    answers = ["n", "", "", "n"]
+    terminal = setup.Terminal(
+        ask=lambda _: answers.pop(0),
+        ask_secret=lambda _: "",
+        say=said.append,
+        choose=lambda *_: picks.pop(0),
+    )
+    setup.run(terminal, environ={"SHELL": "/bin/zsh"}, home=tmp_path)
+
+    # Only the setting that would win is named, without its value, and
+    # only it is commented out; Bedrock keys don't matter for a local model.
+    assert any("sets TRIAGE_MODEL, which would win" in line for line in said)
+    assert not any("sonnet" in line for line in said)
+    assert folder.read_text(encoding="utf-8") == (
+        "AWS_ACCESS_KEY_ID=AKIAEXAMPLE\n# TRIAGE_MODEL=sonnet\n"
+    )
+    assert providers.from_settings().model == "llama3.1:8b"
 
 
 def test_another_service_asks_for_a_price_until_it_parses(
@@ -193,7 +261,7 @@ def test_back_from_a_key_prompt_returns_to_the_menu(
     # OpenAI, then Left at its key prompt, then a local model.
     _run(
         tmp_path,
-        picks=[1, 3, 1],
+        picks=[1, 3, 0],
         answers=["n", "", "n"],
         secrets=["", BACK],
     )

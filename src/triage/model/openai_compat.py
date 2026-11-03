@@ -13,6 +13,7 @@ suits a local model.
 import json
 import logging
 import pathlib
+import urllib.parse
 from typing import TYPE_CHECKING
 from typing import Any
 
@@ -33,6 +34,10 @@ TOOL_NAME = provider.TOOL_NAME
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 MAX_RETRIES = 3
 TIMEOUT_S = 60.0
+# A model on your own machine answers one request at a time and loads on
+# the first one, so a request may wait for the ones before it.
+LOCAL_TIMEOUT_S = 300.0
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 # OpenAI's recommended models for this kind of work, cheapest first, from
 # https://developers.openai.com/api/docs/pricing (standard tier), checked
 # 2026-11-01. Setup suggests them; their prices need no setting.
@@ -53,15 +58,20 @@ class OpenAICompatibleProvider:
         price: The price from settings, for the budget.
     """
 
-    def __init__(self, model: provider.Model, client: Any) -> None:
+    def __init__(
+        self, model: provider.Model, client: Any, timeout_s: float = TIMEOUT_S
+    ) -> None:
         """Wraps an OpenAI client.
 
         Args:
             model: The model to use, with its price.
             client: An ``openai.OpenAI`` client, or a stand-in with the same
                 ``chat.completions.create`` method.
+            timeout_s: How long the client waits for an answer, for the
+                message when it gives up.
         """
         self.name = NAME
+        self._timeout_s = timeout_s
         self.model = model.id
         self.price: pricing.Price | None = model.price
         self._client = client
@@ -81,7 +91,7 @@ class OpenAICompatibleProvider:
         try:
             self._create(8, messages=[{"role": "user", "content": "Say OK."}])
         except openai.APIError as error:
-            raise _error(error, self.model) from error
+            raise _error(error, self.model, self._timeout_s) from error
 
     def classify(self, request: provider.Request) -> provider.Reply:
         """Sends one request and returns the function call's arguments.
@@ -117,7 +127,7 @@ class OpenAICompatibleProvider:
                 tool_choice="auto",
             )
         except openai.APIError as error:
-            raise _error(error, self.model) from error
+            raise _error(error, self.model, self._timeout_s) from error
         usage = _usage(completion)
         message = completion.choices[0].message
         calls = message.tool_calls or []
@@ -212,14 +222,29 @@ def from_settings(
         )
     import openai
 
+    timeout_s = LOCAL_TIMEOUT_S if is_local(base_url) else TIMEOUT_S
     client = openai.OpenAI(
         # Local servers ignore the key, but the SDK requires one.
         api_key=api_key or "unused",
         base_url=base_url,
         max_retries=MAX_RETRIES,
-        timeout=TIMEOUT_S,
+        timeout=timeout_s,
     )
-    return OpenAICompatibleProvider(provider.Model(name, price), client)
+    return OpenAICompatibleProvider(
+        provider.Model(name, price), client, timeout_s
+    )
+
+
+def is_local(base_url: str) -> bool:
+    """Says whether a base URL points at this machine, e.g. Ollama.
+
+    Args:
+        base_url: The endpoint's base URL.
+
+    Returns:
+        Whether its host is this machine.
+    """
+    return (urllib.parse.urlparse(base_url).hostname or "") in LOCAL_HOSTS
 
 
 def parse_price(text: str) -> pricing.Price:
@@ -263,10 +288,19 @@ def _usage(completion: Any) -> provider.Usage:
     )
 
 
-def _error(error: "openai.APIError", model: str) -> provider.ProviderError:
+def _error(
+    error: "openai.APIError", model: str, timeout_s: float = TIMEOUT_S
+) -> provider.ProviderError:
     """Turns an SDK error into a message that says what to do."""
     import openai
 
+    # A timeout is a kind of connection error to the SDK, but the server
+    # was reached; it was too slow.
+    if isinstance(error, openai.APITimeoutError):
+        return provider.ProviderError(
+            f"{model} didn't answer within {timeout_s:.0f} seconds. A local "
+            "model may need --workers 1 or a smaller model."
+        )
     if isinstance(error, openai.AuthenticationError):
         return provider.ProviderError(
             "The endpoint rejected the API key (HTTP 401). Check "
