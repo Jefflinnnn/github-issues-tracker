@@ -10,11 +10,13 @@ and makes issue numbers clickable; piped or redirected, it is plain text.
 import dataclasses
 import datetime
 import os
+import sys
 import textwrap
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import TextIO
 
+from triage import menu
 from triage import text
 from triage.model import digest
 from triage.model import prompt
@@ -119,7 +121,12 @@ class Style:
         Returns:
             Color and links on a terminal, plain text otherwise.
         """
-        terminal = stream.isatty() and environ.get("TERM") != "dumb"
+        # The Windows console draws escape codes only once asked to.
+        terminal = (
+            stream.isatty()
+            and environ.get("TERM") != "dumb"
+            and (stream is not sys.stdout or menu.enable_ansi())
+        )
         return cls(
             color=terminal and not environ.get("NO_COLOR"), links=terminal
         )

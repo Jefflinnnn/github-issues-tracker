@@ -8,6 +8,9 @@ dependencies = [
     "anthropic>=2.3",
     "boto3>=1.35",
     "openai>=1.50",
+    # The standard library has no curses on Windows; triage browse needs it.
+    # It has no wheels for Windows on Arm, where browse prints the summary.
+    "windows-curses>=2.3; sys_platform == 'win32' and platform_machine != 'ARM64'",
 ]
 
 [project.scripts]

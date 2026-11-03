@@ -202,6 +202,8 @@ def test_the_card_shows_the_brief_then_info(browser: browse.Browser) -> None:
     assert "  Hot           among the busiest tenth, 11 reactions and" in text
     # The bot's comment counts nowhere.
     assert "  Activity      9 reactions, 2 comments, 2 people" in text
+    # What the model read: everything here, since the thread is short.
+    assert "  Model read    the post and all 3 comments" in text
     assert "  Last          1d ago, by the reporter" in text
     assert "  Maintainers   replied 6d ago" in text
     day = (NOW - datetime.timedelta(days=3)).astimezone().strftime("%a")
@@ -322,15 +324,28 @@ def test_rows_fit_80_columns_with_short_labels(browser: browse.Browser) -> None:
     assert "bug: severe, urgent" in wide
 
 
-def test_space_and_b_page_through_the_card(browser: browse.Browser) -> None:
+def test_a_card_scrolls_only_as_far_as_its_last_line(
+    browser: browse.Browser,
+) -> None:
     browser.key("j")
     browser.key("enter")
-    browser.page = 3
+    length = len(browser.body(120)[0])
 
-    browser.key(" ")
-    assert browser.scroll == 3
-    browser.key("b")
+    # A card that fits the screen doesn't move, and space does nothing.
+    browser.page = length + 5
+    for key in (" ", "down", "b", "j"):
+        browser.key(key)
     assert browser.scroll == 0
+    assert browser.body(120)[0][1].text.startswith("Title")
+
+    # On a short screen, down stops once the last line shows.
+    browser.page = 4
+    for _ in range(length + 5):
+        browser.key("down")
+    lines, _ = browser.body(120)
+    assert browser.scroll == length - 4 and len(lines) == 4
+    browser.key("up")
+    assert browser.scroll == length - 5
     browser.key("left")
     assert browser.view == "list"
 
@@ -414,3 +429,57 @@ def test_a_hot_and_stale_issue_gets_one_row_that_says_both(
     assert "Stale" not in text
     assert "  Maintainers   none\n" in text
     assert "no maintainer reply" in text
+
+
+def test_the_key_help_puts_each_key_in_brackets_and_wraps(
+    browser: browse.Browser,
+) -> None:
+    wide = [line.text for line in browser.footer(120)]
+    narrow = [line.text for line in browser.footer(80)]
+
+    assert wide == [
+        "[↑↓] move  [space] expand  [enter] card  [[ ]] page  [1-9] jump  "
+        "[o] open gh issue  [q] quit"
+    ]
+    # An 80-column window gets two lines, split between items.
+    assert len(narrow) == 2 and all(len(text) < 80 for text in narrow)
+    assert " ".join(narrow).split() == wide[0].split()
+
+    browser.key("j")
+    browser.key("enter")
+    assert browser.footer(120)[-1].text == (
+        "[n/p] next/prev  [↑↓] scroll  [o] open gh issue  [y] copy  [←] back"
+    )
+
+
+def test_the_card_says_what_the_model_read_of_a_long_thread(
+    isolated: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    node = issue(
+        1,
+        reactions=5,
+        comments=[comment(f"user{n}", 1) for n in range(10)],
+        total_comments=22,
+    )
+    node["body"] = "x" * 5000
+    node["comments"]["nodes"][0]["body"] = "y" * 900
+    serve(monkeypatch, FakeGitHub([[node]], total_open=1))
+    model = FakeModel(default=reply("bug"))
+    monkeypatch.setattr(providers, "from_settings", lambda name: model)
+    monkeypatch.setattr(cli, "_now", lambda: NOW)
+    assert cli.main(["summary", "owner/repo"]) == 0
+    connection = load.connect(isolated)
+    result = run.last_result(connection, repo_ref.parse("owner/repo"), NOW)
+    connection.close()
+    assert result is not None
+    browser = browse.Browser(result, NOW)
+    browser.key("j")
+    browser.key("enter")
+    text = " ".join(line.text.strip() for line in browser.body(120)[0])
+
+    # Counts from GitHub's totals; people only from what was fetched.
+    assert "5 reactions, 22 comments, 11 people in the latest 10" in text
+    assert (
+        "the post (cut to 4,000 characters) and the latest 10 of 22 comments "
+        "(1 cut to 800 characters)"
+    ) in text

@@ -284,9 +284,9 @@ def _build_parser() -> argparse.ArgumentParser:
     completion_command = commands.add_parser(
         "completion",
         description=(
-            "Print the Tab completion script for bash or zsh. triage setup "
-            "can add it to your shell's startup file; to add it yourself, "
-            'put eval "$(triage completion zsh)" in ~/.zshrc.'
+            "Print the Tab completion script for bash, zsh or PowerShell. "
+            "triage setup can add it to your shell's startup file; to add "
+            'it yourself, put eval "$(triage completion zsh)" in ~/.zshrc.'
         ),
     )
     completion_command.add_argument("shell", choices=sorted(completion.SCRIPTS))
