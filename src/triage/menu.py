@@ -3,12 +3,14 @@
 Up/Down (or k/j) move, Enter picks, a number picks that option directly,
 Left (or h) goes back, Esc or q cancel, and Ctrl-C interrupts as usual.
 ``read_line`` reads a typed answer the same way, so Left on an empty line
-goes back there too. Where the terminal can't switch modes (no
-``termios``, as on Windows), the caller should use ``input`` instead.
+goes back there too. It works in macOS and Linux terminals (``termios``)
+and in the Windows console (``msvcrt``); where neither is there, or input
+isn't a terminal, the caller should use ``input`` instead.
 """
 
 import codecs
 import contextlib
+import functools
 import os
 import select
 import sys
@@ -40,12 +42,45 @@ class BackError(Exception):
 
 def supported() -> bool:
     """Says whether this terminal can run the arrow-key menu."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    if sys.platform == "win32":
+        return enable_ansi()
     try:
         import termios  # noqa: F401
         import tty  # noqa: F401
     except ImportError:
         return False
-    return sys.stdin.isatty() and sys.stdout.isatty()
+    return True
+
+
+@functools.cache
+def enable_ansi() -> bool:
+    """Lets the Windows console draw ANSI escape codes, once per process.
+
+    The menu, the second screen and the summary's colors use them. Windows
+    Terminal draws them already; the classic console needs this switch.
+
+    Returns:
+        Whether escape codes work: always on macOS and Linux; on Windows,
+        whether the console accepted the switch.
+    """
+    if sys.platform != "win32":
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.GetStdHandle(-11)  # Standard output.
+    mode = wintypes.DWORD()
+    if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+        return False
+    virtual_terminal_processing = 0x0004
+    return bool(
+        kernel32.SetConsoleMode(
+            handle, mode.value | virtual_terminal_processing
+        )
+    )
 
 
 def choose(
@@ -77,10 +112,8 @@ def choose(
     if read_key is None:
         # One mode switch for the whole menu: switching per key can drop
         # keys that arrive in between, such as a held-down arrow.
-        with _keys_unbuffered() as descriptor:
-            return _run(
-                title, options, default, lambda: _read_key(descriptor), write
-            )
+        with _terminal_keys(utf8=False) as read:
+            return _run(title, options, default, read, write)
     return _run(title, options, default, read_key, write)
 
 
@@ -144,11 +177,8 @@ def read_line(
     """
     write = write or _write_stdout
     if read_key is None:
-        with _keys_unbuffered() as descriptor:
-            decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
-            return _line(
-                prompt, secret, lambda: _read_key(descriptor, decoder), write
-            )
+        with _terminal_keys(utf8=True) as read:
+            return _line(prompt, secret, read, write)
     return _line(prompt, secret, read_key, write)
 
 
@@ -238,12 +268,71 @@ def _write_stdout(text: str) -> None:
 
 
 @contextlib.contextmanager
+def _terminal_keys(utf8: bool) -> Iterator[Callable[[], str]]:
+    """Reads keys from the terminal, one at a time, until the block ends.
+
+    Args:
+        utf8: Decode characters outside ASCII, for typed answers.
+
+    Yields:
+        A function that returns the next key's name or character.
+    """
+    if sys.platform == "win32":
+        import msvcrt
+
+        # The Windows console delivers keys unechoed as they come; no mode
+        # to switch.
+        yield lambda: windows_key(msvcrt.getwch)
+        return
+    with _keys_unbuffered() as descriptor:
+        decoder = (
+            codecs.getincrementaldecoder("utf-8")(errors="ignore")
+            if utf8
+            else None
+        )
+        yield lambda: _read_key(descriptor, decoder)
+
+
+def windows_key(read: Callable[[], str]) -> str:
+    """Reads one keypress from the Windows console.
+
+    Args:
+        read: Returns the console's next character, like ``msvcrt.getwch``.
+            An arrow key arrives as two: a prefix character, then a letter.
+
+    Returns:
+        The key's name, such as ``up`` or ``enter``, or the character.
+
+    Raises:
+        KeyboardInterrupt: Ctrl-C, which the console passes on as a key.
+    """
+    while True:
+        key = read()
+        if key in ("\x00", "\xe0"):
+            name = _WINDOWS_ARROWS.get(read())
+            if name:
+                return name
+            continue  # Another special key, such as F1: ignored.
+        if key == "\x03":
+            raise KeyboardInterrupt
+        if key == "\r":
+            return ENTER
+        if key == "\x08":
+            return BACKSPACE
+        if key in ("\x1b", "\x1a"):  # Esc, or Ctrl-Z for end of input.
+            return CANCEL
+        return key
+
+
+@contextlib.contextmanager
 def _keys_unbuffered() -> Iterator[int]:
     """Delivers keys one at a time, unechoed, until the block ends.
 
     Cbreak mode, not raw: output still turns newlines into line breaks, and
     Ctrl-C still interrupts.
     """
+    if sys.platform == "win32":
+        raise OSError("Windows reads keys with msvcrt, not termios.")
     import termios
     import tty
 
@@ -281,6 +370,7 @@ def _read_key(
     return text
 
 
+_WINDOWS_ARROWS = {"H": UP, "P": DOWN, "M": RIGHT, "K": LEFT}
 _ARROWS = {
     b"[A": UP,
     b"[B": DOWN,

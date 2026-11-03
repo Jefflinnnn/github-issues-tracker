@@ -50,3 +50,30 @@ def test_left_on_an_empty_line_goes_back() -> None:
         _line([menu.LEFT])
     # With text typed, Left does nothing: there's no cursor to move.
     assert _line(["x", menu.LEFT, menu.ENTER])[0] == "x"
+
+
+def test_windows_keys_name_arrows_enter_and_the_rest() -> None:
+    def keys(*typed: str) -> list[str]:
+        queue = list(typed)
+        names = []
+        while queue:
+            names.append(menu.windows_key(lambda: queue.pop(0)))
+        return names
+
+    # Arrows arrive as a prefix and a letter; other special keys are
+    # skipped, so F1 (prefix, then ";") is followed by the next key.
+    assert keys("\xe0", "H", "\x00", "P", "\xe0", "K", "\xe0", "M") == [
+        menu.UP,
+        menu.DOWN,
+        menu.LEFT,
+        menu.RIGHT,
+    ]
+    assert keys("\x00", ";", "\r", "\x08", "\x1b", "\x1a", "é") == [
+        menu.ENTER,
+        menu.BACKSPACE,
+        menu.CANCEL,
+        menu.CANCEL,
+        "é",
+    ]
+    with pytest.raises(KeyboardInterrupt):
+        keys("\x03")

@@ -48,6 +48,27 @@ jobs:
       # No path argument, so mypy checks the files listed in pyproject.toml.
       - name: Type check (mypy)
         run: uv run mypy
+      # The Windows-only code (msvcrt, the console's mode) is checked too.
+      - name: Type check for Windows (mypy)
+        run: uv run mypy --platform win32
+
+      - name: Tests (pytest)
+        run: uv run pytest
+
+  # Menus, Tab completion and browse have Windows code paths; the runner
+  # has PowerShell 7, so the PowerShell completion tests run here.
+  windows:
+    name: Tests on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.10"
+
+      - name: Install project
+        run: uv sync --locked --dev
 
       - name: Tests (pytest)
         run: uv run pytest

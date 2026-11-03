@@ -1,4 +1,5 @@
 import pathlib
+import sys
 
 import pytest
 
@@ -29,5 +30,25 @@ def test_writing_keeps_other_lines_and_hides_the_file(
     config.write_env_file({"B": "3", "C": "4"}, path)
 
     assert path.read_text(encoding="utf-8") == "# mine\nA=1\nB=3\nC=4\n"
-    assert path.stat().st_mode & 0o777 == 0o600
-    assert path.parent.stat().st_mode & 0o777 == 0o700
+    # Windows has no Unix permission bits; the folder in the user's
+    # profile is private there already.
+    if sys.platform != "win32":
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_comment_out_keeps_the_lines_as_comments(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / ".env"
+    path.write_text(
+        "TRIAGE_MODEL=sonnet\n# TRIAGE_PROVIDER=old\nexport AWS_REGION=x\n",
+        encoding="utf-8",
+    )
+
+    config.comment_out(["TRIAGE_MODEL", "TRIAGE_PROVIDER", "AWS_REGION"], path)
+
+    assert path.read_text(encoding="utf-8") == (
+        "# TRIAGE_MODEL=sonnet\n# TRIAGE_PROVIDER=old\n# export AWS_REGION=x\n"
+    )
+    assert config.read_env_file(path) == {}

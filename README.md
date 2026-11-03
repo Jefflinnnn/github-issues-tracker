@@ -83,6 +83,8 @@ triage --help
 ```
 
 This installs `triage` as a command, so you can run it from any folder.
+It runs on macOS, Linux and Windows. On Windows, use PowerShell, in
+Windows Terminal or the classic console.
 
 ## Configure
 
@@ -110,8 +112,9 @@ Setup asks for each setting and saves the answers to
 folder:
 
 1. **GitHub token.** Setup checks it with GitHub before saving it.
-2. **Tab completion.** Setup shows the two lines it would add to `~/.zshrc`
-   (or `~/.bashrc`) and asks before adding them.
+2. **Tab completion.** Setup shows the two lines it would add to `~/.zshrc`,
+   `~/.bashrc`, or your PowerShell profile on Windows, and asks before
+   adding them.
 3. **What do you have?** An Anthropic API key, an OpenAI API key, AWS keys
    for Amazon Bedrock, a local model through Ollama or LM Studio, or
    another OpenAI-compatible service such as Groq, OpenRouter or vLLM.
@@ -141,6 +144,8 @@ A local model costs nothing and needs no key.
    OLLAMA_CONTEXT_LENGTH=8192 ollama serve
    ```
 
+   In PowerShell: `$env:OLLAMA_CONTEXT_LENGTH=8192; ollama serve`.
+
 3. In another terminal, download the model and load it once:
 
    ```bash
@@ -163,11 +168,11 @@ model, setup offers to comment it out, since it would win over setup.
 
 ## Usage
 
-```bash
-triage summary acme/widgets
-triage browse acme/widgets
-triage list
-```
+1. `triage summary acme/widgets` fetches the open issues, tags them and
+   prints the summary.
+2. `triage browse acme/widgets` then looks through every issue from that
+   run.
+3. Optional: `triage list` shows the repositories you're tracking.
 
 Press Tab after `triage summary ` or `triage browse ` to complete the name
 of a repository you've summarized before.
@@ -225,6 +230,7 @@ Info:
   Status        fix failed
   Opened        30d ago (2026-10-03)
   Activity      12 reactions, 2 comments, 2 people
+  Model read    the post and all 2 comments
   Last          1d ago, by the reporter
   Maintainers   replied 10d ago
   Since Oct 26  1 new comment. The reporter says 2.3.1 still crashes
@@ -298,7 +304,7 @@ summary lists up to 10 issues per group; `triage browse` lists them all.
 
 | Term | Means |
 | --- | --- |
-| ACTIVITY | Reactions plus comments |
+| ACTIVITY | Reactions on the issue plus comments, from GitHub's totals |
 | IDLE | Days since a person last commented |
 | ↑ | Demand raised a feature's priority, e.g. `must-have ↑` |
 | hot | Among the busiest tenth by activity, with at least 3 |
@@ -313,9 +319,15 @@ Bot comments aren't counted.
   can end over by at most about one request. Issues left over are tagged
   first on the next run.
 - **Fetching.** triage stops with an error when a repository has more
-  than 20,000 issues to fetch; pass `--limit` for those. It keeps each
-  issue's 10 latest comments and sends the model at most 4,000 characters
-  of the opening post and 800 of each comment.
+  than 20,000 issues to fetch; pass `--limit` for those.
+- **What the model reads.** The opening post, up to 4,000 characters, and
+  the 10 latest comments, up to 800 characters each. A card's "Model read"
+  row says what it read of that issue and what was cut.
+- **Counts.** Reactions and comments are GitHub's totals, so they cover
+  the whole thread. Bot comments are taken off only among the 10 fetched,
+  so a long thread can still count a few older ones. People and "last
+  commented" come from the 10 fetched comments; the card says so when a
+  thread has more.
 - **Rate limits.** triage sends 4 model requests at once. If the provider
   answers with rate-limit errors, lower `--workers`.
 - **Bad replies.** A reply that doesn't fit the tags is retried once. If

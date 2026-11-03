@@ -418,8 +418,8 @@ def _tab_completion(
     shell = completion.detect_shell(environ)
     if shell is None:
         terminal.say(
-            "  Tab completion works in zsh and bash; skipping it for your "
-            "shell."
+            "  Tab completion works in zsh, bash and PowerShell; skipping it "
+            "for your shell."
         )
         return False, "not available for your shell"
     path = completion.startup_file(shell, environ, home)
@@ -439,6 +439,11 @@ def _tab_completion(
         return True, "skipped"
     completion.install(path, shell)
     terminal.say(f"  ✓ Added to {shown}. Open a new terminal to use it.")
+    if shell == "powershell":
+        terminal.say(
+            "  If PowerShell says running scripts is disabled, run: "
+            "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned"
+        )
     return True, f"✓ added to {shown}; open a new terminal"
 
 

@@ -43,8 +43,15 @@ _FIELD = 14
 # Space between a yes or no and the model's reason for it.
 _GAP = "   "
 _MAINTAINERS = {"OWNER", "MEMBER", "COLLABORATOR"}
-_COPIERS = (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"])
-# Lines that space and b scroll when the screen size isn't known.
+# macOS, then Linux (Wayland, then X11), then Windows.
+_COPIERS = (
+    ["pbcopy"],
+    ["wl-copy"],
+    ["xclip", "-selection", "clipboard"],
+    ["xsel", "--clipboard", "--input"],
+    ["clip"],
+)
+# Lines the card has room for when the screen size isn't known.
 PAGE = 10
 # Issues an open group shows at once; ] and [ page through the rest.
 GROUP_PAGE = 10
@@ -52,12 +59,25 @@ GROUP_PAGE = 10
 CARD_WIDTH = 100
 
 
+# Each key in brackets, then what it does; a narrow screen wraps the line
+# between items.
 HELP = {
-    "list": (
-        "↑↓ move  space expand  enter card  ] [ page  1-9 jump  "
-        "o open gh issue  q quit"
-    ),
-    "card": "n/p next/prev  ↑↓ space b scroll  o open gh issue  y copy  ← back",
+    "list": [
+        "[↑↓] move",
+        "[space] expand",
+        "[enter] card",
+        "[[ ]] page",
+        "[1-9] jump",
+        "[o] open gh issue",
+        "[q] quit",
+    ],
+    "card": [
+        "[n/p] next/prev",
+        "[↑↓] scroll",
+        "[o] open gh issue",
+        "[y] copy",
+        "[←] back",
+    ],
 }
 
 
@@ -127,8 +147,10 @@ class Browser:
         self.viewing: tuple[int, int] = (0, 0)
         self.scroll = 0
         self.message = ""
-        # Lines space and b scroll; the screen sets it to its height.
+        # Lines the card has room for; the screen sets it to its height.
         self.page = PAGE
+        # The open card's length, so scrolling stops at its end.
+        self.card_length = 0
 
     # What the screen shows.
 
@@ -175,8 +197,15 @@ class Browser:
             return ""
         return f"Since {self._day(self.since)}: " + " · ".join(parts)
 
-    def footer(self) -> list[Line]:
-        """Returns the fixed lines at the bottom of the current view."""
+    def footer(self, width: int = report.WIDE) -> list[Line]:
+        """Returns the fixed lines at the bottom of the current view.
+
+        Args:
+            width: The screen's width; the key help wraps to fit it.
+
+        Returns:
+            The lines.
+        """
         lines = []
         if self.view == "list":
             tagged = sum(
@@ -188,8 +217,11 @@ class Browser:
                 lines.append(
                     Line(f"{tagged} of {scanned} scanned tagged", "dim")
                 )
-        lines.append(Line(self.message or HELP[self.view], "dim"))
-        return lines
+        if self.message:
+            return [*lines, Line(self.message, "dim")]
+        return lines + [
+            Line(text, "dim") for text in _wrap(HELP[self.view], width)
+        ]
 
     def body(self, width: int) -> tuple[list[Line], int]:
         """Returns the scrolling lines and which one the cursor is on.
@@ -201,7 +233,10 @@ class Browser:
             The lines, and the cursor's line (-1 outside the list).
         """
         if self.view == "card":
-            return self._card(width)[self.scroll :], -1
+            card = self._card(width)
+            self.card_length = len(card)
+            self.scroll = min(self.scroll, self._last_scroll())
+            return card[self.scroll :], -1
         entries = self.entries()
         if not entries:
             return [
@@ -319,20 +354,24 @@ class Browser:
             self._open_card(group_index, position + 1)
         elif key == "p" and position > 0:
             self._open_card(group_index, position - 1)
-        elif key in ("j", "down", " ", "k", "up", "b"):
+        elif key in ("j", "down", "k", "up"):
             self._scroll(key)
         elif key in ("o", "y"):
             self._act(key, issues[position])
         return True
 
     def _scroll(self, key: str) -> None:
-        """Scrolls a line with arrows or j/k, a page with space or b.
+        """Scrolls a card a line with the arrows or j/k.
 
-        Space and b stand in for Page Down and Page Up, which need Fn on a
-        MacBook and which Terminal keeps for its own scrollback.
+        It stops once the card's last line shows, so a card that fits the
+        screen doesn't move.
         """
-        step = {"j": 1, "down": 1, "k": -1, "up": -1, " ": self.page}
-        self.scroll = max(self.scroll + step.get(key, -self.page), 0)
+        step = 1 if key in ("j", "down") else -1
+        self.scroll = min(max(self.scroll + step, 0), self._last_scroll())
+
+    def _last_scroll(self) -> int:
+        """Returns how far the open card can scroll: to its last line."""
+        return max(self.card_length - self.page, 0)
 
     def _open_card(self, group_index: int, position: int) -> None:
         self.view = "card"
@@ -470,10 +509,12 @@ class Browser:
                 [
                     _count(issue.reaction_count, "reaction"),
                     _count(transform.comments_by_people(issue), "comment"),
-                    _count(facts.people, "person", "people"),
+                    _count(facts.people, "person", "people")
+                    + ("" if facts.complete else f" {facts.seen}"),
                 ]
             ),
         )
+        field("Model read", facts.read)
         field("Last", facts.last)
         field("Maintainers", facts.maintainers)
         if self.since is not None and issue.id in self.changed:
@@ -613,6 +654,12 @@ class _Facts:
             reporter``.
         maintainers: Whether a maintainer replied, e.g. ``replied 6d
             ago`` or ``none in the latest 10 comments``.
+        complete: Whether every comment was fetched.
+        seen: Which comments were fetched, e.g. ``in the latest 10
+            comments``, for counts made from them.
+        read: What the model read, e.g. ``the post and the latest 10 of 22
+            comments``. Reactions and the comment count are GitHub's
+            totals; people and the rest come from what was fetched.
         reply: The same in a few words, for "Why here", e.g. ``no
             maintainer reply``.
     """
@@ -635,16 +682,36 @@ class _Facts:
             if c.author_association in _MAINTAINERS and c.author != issue.author
         ]
         complete = len(issue.comments) >= issue.comment_count
+        self.complete = complete
+        self.seen = f"in the latest {len(issue.comments)} comments"
+        self.read = _what_was_read(issue, complete)
         if replies:
             self.maintainers = f"replied {_ago(now - replies[-1].created_at)}"
             self.reply = "maintainer replied"
         else:
-            self.maintainers = (
-                "none"
-                if complete
-                else f"none in the latest {len(issue.comments)} comments"
-            )
+            self.maintainers = "none" if complete else f"none {self.seen}"
             self.reply = "no maintainer reply"
+
+
+def _what_was_read(issue: transform.Issue, complete: bool) -> str:
+    """Says what the model read of an issue, and what was cut."""
+    body = issue.body or ""
+    post = (
+        f"the post (cut to {prompt.BODY_MAX_CHARS:,} characters)"
+        if len(body) > prompt.BODY_MAX_CHARS
+        else "the post"
+    )
+    fetched = len(issue.comments)
+    if not issue.comment_count:
+        return post
+    if complete:
+        comments = "the comment" if fetched == 1 else f"all {fetched} comments"
+    else:
+        comments = f"the latest {fetched} of {issue.comment_count} comments"
+    cut = sum(len(c.body) > prompt.COMMENT_MAX_CHARS for c in issue.comments)
+    if cut:
+        comments += f" ({cut} cut to {prompt.COMMENT_MAX_CHARS} characters)"
+    return f"{post} and {comments}"
 
 
 def _level(high: bool, reason: str | None) -> str:
@@ -681,6 +748,18 @@ def _ago(delta: datetime.timedelta) -> str:
 def _count(number: int, noun: str, plural: str = "") -> str:
     """Returns e.g. ``1 reaction`` or ``6 comments``."""
     return f"{number} {noun if number == 1 else plural or noun + 's'}"
+
+
+def _wrap(items: list[str], width: int) -> list[str]:
+    """Joins help items two spaces apart, starting a new line to fit."""
+    lines = [items[0]]
+    for item in items[1:]:
+        joined = f"{lines[-1]}  {item}"
+        if len(joined) < width:
+            lines[-1] = joined
+        else:
+            lines.append(item)
+    return lines
 
 
 def _page_count(issues: int) -> int:
@@ -772,7 +851,7 @@ def run(browser: Browser) -> None:
         while True:
             height, width = screen.getmaxyx()
             header = browser.header(width)
-            footer = browser.footer()
+            footer = browser.footer(width)
             body, cursor = browser.body(width)
             room = max(height - len(header) - len(footer), 1)
             browser.page = max(room - 1, 1)

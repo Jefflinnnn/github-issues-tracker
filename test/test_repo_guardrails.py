@@ -136,6 +136,13 @@ def test_ci_runs_on_every_pull_request() -> None:
     assert not (triggers["pull_request"] or {}).get("branches")
 
 
+def test_ci_runs_the_tests_on_linux_and_windows() -> None:
+    """CI tests on Ubuntu and Windows, which have different code paths."""
+    workflow = yaml.safe_load(CI_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    runners = {job["runs-on"] for job in workflow["jobs"].values()}
+    assert {"ubuntu-latest", "windows-latest"} <= runners
+
+
 def test_ci_scans_for_secrets() -> None:
     """CI includes the gitleaks secret scan."""
     workflow_text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")

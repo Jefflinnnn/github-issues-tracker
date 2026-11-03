@@ -2,12 +2,16 @@
 
 The scripts complete the commands people use (not ``completion`` itself),
 the repositories you've summarized after ``triage summary`` and ``triage
-browse``, and the model names after ``--model``. They get repository
-names from ``triage list --names``, so the history database is the one
-source.
+browse``, the flags after ``--``, and the model names after ``--model``.
+They get repository names from ``triage list --names``, so the history
+database is the one source. There is one script each for bash and zsh on
+macOS and Linux, and for PowerShell on Windows.
 """
 
 import pathlib
+import shutil
+import subprocess
+import sys
 from collections.abc import Mapping
 
 BASH_SCRIPT = r"""# bash completion for triage.
@@ -90,23 +94,70 @@ _triage() {
 compdef _triage triage
 """
 
-SCRIPTS = {"bash": BASH_SCRIPT, "zsh": ZSH_SCRIPT}
+POWERSHELL_SCRIPT = r"""# PowerShell completion for triage.
+# Load it with: triage completion powershell | Out-String | Invoke-Expression
+Register-ArgumentCompleter -Native -CommandName triage -ScriptBlock {
+  param($wordToComplete, $commandAst, $cursorPosition)
+  # The words typed so far, without triage itself or the word being typed.
+  $before = @($commandAst.CommandElements | Select-Object -Skip 1 |
+    ForEach-Object { $_.ToString() })
+  if ($wordToComplete -and $before.Count -gt 0) {
+    $before = @($before | Select-Object -First ($before.Count - 1))
+  }
+  $command = @($before | Where-Object { $_ -notlike '-*' })[0]
+  $previous = if ($before.Count -gt 0) { $before[-1] } else { '' }
+  if (-not $command) {
+    $choices = 'setup', 'summary', 'browse', 'list'
+  } elseif ($command -eq 'browse') {
+    $choices = @(triage list --names 2>$null)
+  } elseif ($command -ne 'summary') {
+    $choices = @()
+  } elseif ($previous -eq '--model') {
+    $choices = 'haiku', 'sonnet', 'opus'
+  } elseif ($previous -in '--limit', '--budget-usd', '--workers') {
+    $choices = @()
+  } elseif ($wordToComplete -like '-*') {
+    $choices = '--limit', '--model', '--budget-usd', '--workers'
+  } else {
+    $choices = @(triage list --names 2>$null)
+  }
+  $choices | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+    [System.Management.Automation.CompletionResult]::new(
+      $_, $_, 'ParameterValue', $_)
+  }
+}
+"""
+
+SCRIPTS = {
+    "bash": BASH_SCRIPT,
+    "zsh": ZSH_SCRIPT,
+    "powershell": POWERSHELL_SCRIPT,
+}
 
 # Written above the eval line so you can tell where it came from.
 MARKER = "# triage: Tab completion"
 
 
-def detect_shell(environ: Mapping[str, str]) -> str | None:
+def detect_shell(
+    environ: Mapping[str, str], platform: str = sys.platform
+) -> str | None:
     """Returns the user's shell if completion supports it.
 
     Args:
         environ: Environment variables; ``SHELL`` is read.
+        platform: ``sys.platform``; on Windows, without ``SHELL`` set (as
+            Git Bash sets it), the shell is PowerShell.
 
     Returns:
-        ``"bash"`` or ``"zsh"``, or None for any other or unset shell.
+        ``"bash"``, ``"zsh"`` or ``"powershell"``, or None for any other
+        or unset shell.
     """
     shell = pathlib.PurePath(environ.get("SHELL", "")).name
-    return shell if shell in SCRIPTS else None
+    if shell.removesuffix(".exe") in ("bash", "zsh"):
+        return shell.removesuffix(".exe")
+    if not shell and platform == "win32":
+        return "powershell"
+    return None
 
 
 def startup_file(
@@ -115,28 +166,72 @@ def startup_file(
     """Returns the startup file a new interactive shell reads.
 
     Args:
-        shell: ``"bash"`` or ``"zsh"``.
+        shell: ``"bash"``, ``"zsh"`` or ``"powershell"``.
         environ: Environment variables; zsh honors ``ZDOTDIR``.
         home: The user's home folder.
 
     Returns:
         ``~/.zshrc`` (or ``$ZDOTDIR/.zshrc``) for zsh, ``~/.bashrc`` for
-        bash.
+        bash, and PowerShell's ``$PROFILE`` for PowerShell.
     """
     if shell == "zsh":
         return pathlib.Path(environ.get("ZDOTDIR") or home) / ".zshrc"
+    if shell == "powershell":
+        return powershell_profile(home)
     return home / ".bashrc"
+
+
+def powershell_profile(home: pathlib.Path) -> pathlib.Path:
+    """Returns the profile PowerShell runs at start, ``$PROFILE``.
+
+    PowerShell knows where it is, Documents moved to OneDrive included, so
+    it is asked: PowerShell 7 (``pwsh``) first, then Windows PowerShell.
+
+    Args:
+        home: The user's home folder, for when neither answers.
+
+    Returns:
+        The profile's path; it may not exist yet.
+    """
+    for program in ("pwsh", "powershell"):
+        if shutil.which(program) is None:
+            continue
+        try:
+            found = subprocess.run(
+                [
+                    program,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "$PROFILE",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=True,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if found:
+            return pathlib.Path(found)
+    return (
+        home / "Documents" / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+    )
 
 
 def setup_lines(shell: str) -> str:
     """Returns the lines that turn on completion in a startup file.
 
     Args:
-        shell: ``"bash"`` or ``"zsh"``.
+        shell: ``"bash"``, ``"zsh"`` or ``"powershell"``.
 
     Returns:
-        The marker comment and the eval line, newline-terminated.
+        The marker comment and the line that loads the script,
+        newline-terminated.
     """
+    if shell == "powershell":
+        load = "triage completion powershell | Out-String | Invoke-Expression"
+        return f"{MARKER}\n{load}\n"
     return f'{MARKER}\neval "$(triage completion {shell})"\n'
 
 
@@ -145,7 +240,7 @@ def is_installed(path: pathlib.Path, shell: str) -> bool:
 
     Args:
         path: The startup file; it may not exist.
-        shell: ``"bash"`` or ``"zsh"``.
+        shell: ``"bash"``, ``"zsh"`` or ``"powershell"``.
 
     Returns:
         True if the file mentions ``triage completion <shell>``.
@@ -159,12 +254,16 @@ def install(path: pathlib.Path, shell: str) -> None:
     """Appends the completion lines to a startup file, creating it if needed.
 
     Args:
-        path: The startup file.
-        shell: ``"bash"`` or ``"zsh"``.
+        path: The startup file; its folder is made if needed, as
+            PowerShell's may not exist yet.
+        shell: ``"bash"``, ``"zsh"`` or ``"powershell"``.
     """
+    path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
     separator = "" if not existing or existing.endswith("\n") else "\n"
-    with path.open("a", encoding="utf-8") as startup:
+    # Unix line endings even on Windows: Git Bash's bash reads a carriage
+    # return as part of the command, and PowerShell takes either.
+    with path.open("a", encoding="utf-8", newline="\n") as startup:
         startup.write(
             f"{separator}\n{setup_lines(shell)}"
             if existing
