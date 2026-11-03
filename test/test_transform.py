@@ -1,3 +1,4 @@
+import datetime
 from typing import Any
 
 from conftest import NOW
@@ -63,3 +64,22 @@ def test_bots_are_left_out_of_counts_even_without_the_bot_type() -> None:
     # A login that merely ends in "bot" is a person.
     talbot = transform.to_issue(issue(2, comments=[comment("talbot", 1)]))
     assert transform.comments_by_people(talbot) == 1
+
+
+def test_only_a_person_commenting_on_an_older_issue_counts_as_changed() -> None:
+    since = NOW - datetime.timedelta(days=3)
+
+    def changed(node: dict[str, Any]) -> bool:
+        return transform.commented_since(transform.to_issue(node), since)
+
+    assert changed(issue(1, opened_days_ago=9, comments=[comment("ann", 1)]))
+    # A bot's comment, an older comment, or a new issue doesn't count.
+    assert not changed(
+        issue(2, opened_days_ago=9, comments=[comment("ci-bot", 1)])
+    )
+    assert not changed(
+        issue(3, opened_days_ago=9, comments=[comment("ann", 5)])
+    )
+    assert not changed(
+        issue(4, opened_days_ago=1, comments=[comment("ann", 0.5)])
+    )

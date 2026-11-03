@@ -39,10 +39,6 @@ if TYPE_CHECKING:
 _FIELD = 12
 _MAINTAINERS = {"OWNER", "MEMBER", "COLLABORATOR"}
 _COPIERS = (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"])
-# Below this width, rows use short labels and status names, so an 80-column
-# window, the default for a new macOS Terminal window, keeps room for the
-# summary.
-WIDE = 100
 # Lines that space and b scroll when the screen size isn't known.
 PAGE = 10
 # Issues an open group shows at once; ] and [ page through the rest.
@@ -50,43 +46,6 @@ GROUP_PAGE = 10
 # Cards wrap at this width, so long text stays readable in a wide window.
 CARD_WIDTH = 100
 
-
-@dataclasses.dataclass(frozen=True)
-class _Columns:
-    """Widths of a list row's columns, and its column header's names."""
-
-    number: int
-    label: int
-    activity: int
-    idle: int
-    status: int
-    activity_name: str
-
-    @property
-    def prefix(self) -> int:
-        """Width of everything before the summary."""
-        return (
-            2
-            + self.number
-            + self.label
-            + self.activity
-            + self.idle
-            + 2
-            + self.status
-        )
-
-
-_WIDE_COLUMNS = _Columns(8, 21, 9, 6, 16, "ACTIVITY")
-_NARROW_COLUMNS = _Columns(7, 9, 5, 5, 11, "ACT")
-# Short status names for narrow rows.
-_SHORT_STATUS = {
-    prompt.Subtag.FIX_FAILED: "failed",
-    prompt.Subtag.FIX_RELEASED: "released",
-    prompt.Subtag.FIX_CONFIRMED: "confirmed",
-    prompt.Subtag.FIX_IN_PROGRESS: "fixing",
-    prompt.Subtag.NEEDS_INFO: "needs info",
-    prompt.Subtag.DUPLICATE: "duplicate",
-}
 
 HELP = {
     "list": (
@@ -144,7 +103,7 @@ class Browser:
         self.opener = opener or open_url
         self.copier = copier or copy_to_clipboard
         self.report = report.Report(
-            result, report.MAX_WIDTH, report.PLAIN, True, True
+            result, report.MAX_WIDTH, report.PLAIN, hot_and_stale=True
         )
         self.groups = [g for g in self.report.groups(None) if g.total]
         # Changes are measured from the run before the last, the same
@@ -168,7 +127,7 @@ class Browser:
 
     # What the screen shows.
 
-    def header(self, width: int = WIDE) -> list[Line]:
+    def header(self, width: int = report.WIDE) -> list[Line]:
         """Returns the fixed lines at the top of the current view.
 
         Args:
@@ -186,7 +145,7 @@ class Browser:
             since = self.since_line()
             if since:
                 lines.append(Line(since))
-            lines.append(Line(self._column_header(width), "bold"))
+            lines.append(Line(self.report.column_header(width), "bold"))
             return lines
         group_index, position = self.viewing
         group = self.groups[group_index]
@@ -201,26 +160,10 @@ class Browser:
 
     def since_line(self) -> str:
         """Says what changed since the baseline; empty when nothing did."""
-        if self.since is None:
+        since = self.result.since_last_run
+        if self.since is None or since is None:
             return ""
-        new = sum(
-            item.issue.created_at >= self.since for item in self.result.flagged
-        )
-        commented = len(self.changed) - new
-        closed = (
-            self.result.since_last_run.closed
-            if self.result.since_last_run
-            else 0
-        )
-        parts = [
-            f"{count} {name}"
-            for count, name in (
-                (new, "new"),
-                (closed, "closed"),
-                (commented, "with new comments"),
-            )
-            if count
-        ]
+        parts = report.since_counts(since)
         if not parts:
             return ""
         return f"Since {self._day(self.since)}: " + " · ".join(parts)
@@ -284,9 +227,16 @@ class Browser:
                     Line(f"{entry.group + 1} {arrow} {heading}", "bold")
                 )
             else:
-                # Red only in "Bugs to fix", for the urgent ones.
-                red = group.title == "BUGS TO FIX"
-                lines.append(self._row(entry.item, width, red))
+                item = entry.item
+                mark = "● " if item.issue.id in self.unread else "  "
+                lines.append(
+                    Line(
+                        self.report.row(item, group, width, report.PLAIN, mark),
+                        "accent"
+                        if self.report.is_red(item, group)
+                        else "normal",
+                    )
+                )
         return lines, self.cursor
 
     def entries(self) -> list[_Entry]:
@@ -444,67 +394,6 @@ class Browser:
             copied = self.copier(url)
             self.message = f"Copied {url}" if copied else f"Link: {url}"
 
-    # The list.
-
-    def _column_header(self, width: int) -> str:
-        columns = _columns(width)
-        return (
-            " " * (2 + columns.number)
-            + f"{'TAGS':<{columns.label}}"
-            + f"{columns.activity_name:>{columns.activity}}"
-            + f"{'IDLE':>{columns.idle}}  "
-            + f"{'STATUS':<{columns.status}}SUMMARY"
-        )
-
-    def _row(
-        self, item: transform.FlaggedIssue, width: int, red: bool = False
-    ) -> Line:
-        """One issue's row, with short labels below ``WIDE`` columns.
-
-        With ``red``, an urgent bug's row is in the accent color.
-        """
-        columns = _columns(width)
-        label, urgent = self.report.label(item)
-        subtag = self.report.subtag(item)
-        if columns is _NARROW_COLUMNS:
-            label = self._short_label(item)
-            status = _SHORT_STATUS[subtag] if subtag else ""
-        else:
-            status = subtag.value if subtag else ""
-        mark = "● " if item.issue.id in self.unread else "  "
-        headline = self.report.headline(item)
-        room = max(width - 1 - columns.prefix, 10)
-        if len(headline) > room:
-            headline = headline[: room - 1] + "…"
-        text = (
-            mark
-            + f"{'#' + str(item.issue.number):<{columns.number}}"
-            + f"{label:<{columns.label}}"
-            + f"{item.engagement:>{columns.activity}}"
-            + f"{str(item.idle_days) + 'd':>{columns.idle}}  "
-            + f"{status:<{columns.status}}"
-            + headline
-        )
-        return Line(text, "accent" if red and urgent else "normal")
-
-    def _short_label(self, item: transform.FlaggedIssue) -> str:
-        """Names an issue's tags in one word, for narrow rows.
-
-        A bug reads ``urgent``, ``severe`` or ``bug``, and a feature its
-        MoSCoW word; the card shows the rest.
-        """
-        tagging = self.report.tagging(item)
-        if tagging is None:
-            return "untagged"
-        if tagging.tag is prompt.Tag.BUG:
-            if tagging.priority is prompt.Level.HIGH:
-                return "urgent"
-            return "severe" if tagging.severity is prompt.Level.HIGH else "bug"
-        if tagging.tag is prompt.Tag.FEATURE and tagging.moscow:
-            word = tagging.moscow.value.split("-")[0]
-            return word + (" ↑" if item.issue.id in self.result.raised else "")
-        return str(tagging.tag.value)
-
     # The card.
 
     def _card(self, width: int) -> list[Line]:
@@ -650,8 +539,8 @@ class Browser:
         if self.since is None:
             return False
         issue = item.issue
-        return issue.created_at >= self.since or any(
-            c.created_at >= self.since for c in transform.human_comments(issue)
+        return issue.created_at >= self.since or transform.commented_since(
+            issue, self.since
         )
 
     def _day(self, moment: datetime.datetime) -> str:
@@ -737,11 +626,6 @@ def _count(number: int, noun: str, plural: str = "") -> str:
 def _page_count(issues: int) -> int:
     """Returns how many pages a group's issues fill."""
     return max(1, -(-issues // GROUP_PAGE))
-
-
-def _columns(width: int) -> _Columns:
-    """Returns the row layout for a screen width."""
-    return _WIDE_COLUMNS if width >= WIDE else _NARROW_COLUMNS
 
 
 def open_url(url: str) -> bool:

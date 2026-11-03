@@ -31,13 +31,14 @@ class SinceLastRun:
     Attributes:
         days: Whole days since the previous run started.
         new: Open issues opened since then.
-        changed: Open issues opened before then and updated since.
+        changed: Open issues opened before then with new comments from
+            people since; see ``transform.commented_since``.
         closed: Issues closed since then.
         digest: What matters most among the changes, in one or two
             sentences, or None when it wasn't written.
         skipped: Why there is no digest; empty when there is one or
             nothing changed.
-        counts: The previous run's tag counts, or None if it saved none.
+        previous_open: Open issues on GitHub at the previous run.
         tag_changes: How each main tag's count changed through issues
             opened, closed or tagged differently since then. Issues tagged
             for the first time don't count: that's tagging catching up,
@@ -50,7 +51,7 @@ class SinceLastRun:
     closed: int
     digest: str | None
     skipped: str
-    counts: dict[str, int] | None
+    previous_open: int
     tag_changes: dict[str, int]
 
 
@@ -60,28 +61,18 @@ class RunResult:
 
     Attributes:
         name_with_owner: ``owner/name`` with GitHub's casing.
-        url: Link to the repository.
         previous_run_at: When the previous run started, or None on the
             first run.
-        fetch: How this run fetched: ``all`` (every open issue),
-            ``changes`` (only what changed since the previous run),
-            ``limited`` (the most recently updated open issues, plus what
-            changed since the previous run) or ``stored`` (nothing; the
-            result was read back from storage).
-        limit: The ``--limit`` this run used; 0 for none.
-        fetched: Issues fetched this run, open or closed.
         open_on_github: Open issues on GitHub right now.
         flagged: The stored open issues with their computed flags.
         tags: ``{issue ID: tagging}`` for issues with an up-to-date tag. A
             feature's MoSCoW priority already includes the demand floor.
         raised: IDs of features whose priority the demand floor raised
             above what the model chose.
-        model: The model ID that tagged them.
         outcome: What the tagging step did this run.
         budget_usd: The run's budget; None for a result read back from
             storage, whose budget wasn't kept.
         spent_usd: What the run's requests cost, the digest included.
-        counts: This run's tag counts; see :func:`counts`.
         since_last_run: What changed since the previous run; None on the
             first run.
         ran_at: When the run started, for a result read back from storage;
@@ -89,20 +80,14 @@ class RunResult:
     """
 
     name_with_owner: str
-    url: str
     previous_run_at: datetime.datetime | None
-    fetch: str
-    limit: int
-    fetched: int
     open_on_github: int
     flagged: list[transform.FlaggedIssue]
     tags: dict[str, prompt.Tagging]
     raised: set[str]
-    model: str
     outcome: classifier.Outcome
     budget_usd: float | None
     spent_usd: float
-    counts: dict[str, int]
     since_last_run: SinceLastRun | None
     ran_at: datetime.datetime | None = None
 
@@ -163,9 +148,8 @@ def run(
 
     since = load.last_run_started(connection, repo.full_name)
     since_time = transform.parse_time(since) if since else None
-    previous_counts = load.last_counts(connection, repo.full_name)
+    previous = load.last_run(connection, repo.full_name)
     if limit:
-        fetch = "limited"
         extracted = extract.fetch_open_issues(
             repo, limit, token, fetching("Fetching")
         )
@@ -182,14 +166,12 @@ def run(
                     nodes[node["id"]] = node
         fetched_nodes = list(nodes.values())
     elif since is not None and load.is_complete(connection, repo.full_name):
-        fetch = "changes"
         extracted = extract.fetch_changed_issues(
             repo, since, token, fetching("Fetching changes")
         )
         saw_every_open = False
         fetched_nodes = extracted.nodes
     else:
-        fetch = "all"
         extracted = extract.fetch_open_issues(
             repo, 0, token, fetching("Fetching")
         )
@@ -256,36 +238,28 @@ def run(
             previous_tags,
             model,
             budget_usd - spent,
-            previous_counts,
+            previous.open_count if previous else extracted.total_open,
         )
         spent += digest_cost
     status.clear()
-    run_counts = counts(flagged, tags, extracted.total_open)
     load.finish_run(
         connection,
         run_id,
         model.model,
         outcome.tagged,
         spent,
-        run_counts,
         since_last_run.digest if since_last_run else None,
     )
     return RunResult(
         name_with_owner=name,
-        url=extracted.repository["url"],
-        previous_run_at=transform.parse_time(since) if since else None,
-        fetch=fetch,
-        limit=limit,
-        fetched=len(issues),
+        previous_run_at=since_time,
         open_on_github=extracted.total_open,
         flagged=flagged,
         tags=tags,
         raised=raised,
-        model=model.model,
         outcome=outcome,
         budget_usd=budget_usd,
         spent_usd=spent,
-        counts=run_counts,
         since_last_run=since_last_run,
     )
 
@@ -323,8 +297,7 @@ def last_result(
         since = last.previous_started_at
         new = sum(item.issue.created_at >= since for item in flagged)
         changed = sum(
-            item.issue.created_at < since <= item.issue.updated_at
-            for item in flagged
+            transform.commented_since(item.issue, since) for item in flagged
         )
         closed = load.closed_since(connection, name, since)
         since_last_run = SinceLastRun(
@@ -334,51 +307,26 @@ def last_result(
             closed=len(closed),
             digest=last.digest,
             skipped="",
-            counts=None,
+            previous_open=(
+                last.open_count
+                if last.previous_open_count is None
+                else last.previous_open_count
+            ),
             tag_changes={},
         )
     return RunResult(
         name_with_owner=name,
-        url=last.url,
         previous_run_at=last.previous_started_at,
-        fetch="stored",
-        limit=0,
-        fetched=0,
         open_on_github=last.open_count,
         flagged=flagged,
         tags=tags,
         raised=raised,
-        model="",
         outcome=classifier.Outcome(last.issues_tagged, [], 0, last.spent_usd),
         budget_usd=None,
         spent_usd=last.spent_usd,
-        counts=counts(flagged, tags, last.open_count),
         since_last_run=since_last_run,
         ran_at=last.started_at,
     )
-
-
-def counts(
-    flagged: list[transform.FlaggedIssue],
-    tags: dict[str, prompt.Tagging],
-    open_on_github: int,
-) -> dict[str, int]:
-    """Counts what the summary's tag table shows, to compare across runs.
-
-    Args:
-        flagged: The stored open issues.
-        tags: Their up-to-date taggings.
-        open_on_github: Open issues on GitHub.
-
-    Returns:
-        ``open`` (on GitHub), ``untagged``, and one count per main tag.
-    """
-    result = {"open": open_on_github, "untagged": 0}
-    result |= {tag.value: 0 for tag in prompt.Tag}
-    for item in flagged:
-        found = tags.get(item.issue.id)
-        result[found.tag.value if found else "untagged"] += 1
-    return result
 
 
 def _since_last_run(
@@ -392,14 +340,14 @@ def _since_last_run(
     before: dict[str, prompt.Tagging],
     model: provider.Provider,
     budget_left_usd: float,
-    previous_counts: dict[str, int] | None,
+    previous_open: int,
 ) -> tuple[SinceLastRun, float]:
     """Finds what changed since the previous run and writes the digest.
 
     Returns:
         What changed, and what writing the digest cost.
     """
-    new, changed = [], []
+    new, changed, moved = [], [], []
     for item in flagged:
         issue = item.issue
         tagging = tags.get(issue.id)
@@ -415,8 +363,13 @@ def _since_last_run(
         )
         if issue.created_at >= since_time:
             new.append((tagging, entry))
-        elif issue.updated_at >= since_time:
+        elif transform.commented_since(issue, since_time):
             changed.append((tagging, entry))
+        elif issue.updated_at >= since_time and entry.transition:
+            # Updated without a comment from a person, but its tags moved,
+            # e.g. a bot announced a release: the digest hears of it, but
+            # it isn't counted as having new comments.
+            moved.append((tagging, entry))
     closed_rows = load.closed_since(connection, name, since)
     closed = [
         digest.Item(number=number, label="", summary=title)
@@ -425,6 +378,8 @@ def _since_last_run(
     tag_changes = _tag_changes(
         flagged, tags, before, since_time, [row[0] for row in closed_rows]
     )
+    changed_count = len(changed)
+    changed += moved
     changed.sort(key=lambda pair: (not pair[1].transition, -pair[1].activity))
     new.sort(key=lambda pair: (not _pressing(pair[0]), -pair[1].activity))
     days = (now - since_time).days
@@ -444,11 +399,11 @@ def _since_last_run(
     result = SinceLastRun(
         days=days,
         new=len(new),
-        changed=len(changed),
+        changed=changed_count,
         closed=len(closed),
         digest=written.text,
         skipped=written.skipped,
-        counts=previous_counts,
+        previous_open=previous_open,
         tag_changes=tag_changes,
     )
     return result, written.cost_usd

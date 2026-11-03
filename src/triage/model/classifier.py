@@ -27,6 +27,7 @@ from collections.abc import Sequence
 from typing import Any
 from typing import TypeVar
 
+from triage import text
 from triage.model import pricing
 from triage.model import prompt
 from triage.model import provider
@@ -224,11 +225,11 @@ def validate(reply: provider.Reply) -> prompt.Tagging:
     summary = data.get("summary")
     if not isinstance(summary, str) or not summary.strip():
         raise InvalidReplyError("the summary is missing")
-    summary = _cut_at_word(summary.strip(), prompt.SUMMARY_HARD_MAX_CHARS)
+    summary = text.cut_at_word(summary.strip(), prompt.SUMMARY_HARD_MAX_CHARS)
     brief = data.get("brief")
     if not isinstance(brief, str) or not brief.strip():
         raise InvalidReplyError("the brief is missing")
-    brief_text = _cut_at_word(brief.strip(), prompt.BRIEF_HARD_MAX_CHARS)
+    brief_text = text.cut_at_word(brief.strip(), prompt.BRIEF_HARD_MAX_CHARS)
     change_note = _optional_text(data, "change", prompt.CHANGE_HARD_MAX_CHARS)
     subtag = (
         _enum(prompt.Subtag, data, "subtag")
@@ -269,14 +270,7 @@ def _optional_text(
     value = data.get(field)
     if not isinstance(value, str) or not value.strip():
         return None
-    return _cut_at_word(value.strip(), limit)
-
-
-def _cut_at_word(text: str, limit: int) -> str:
-    """Cuts text to at most ``limit`` characters, at a word, marking the cut."""
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
+    return text.cut_at_word(value.strip(), limit)
 
 
 _EnumT = TypeVar("_EnumT", bound=enum.Enum)

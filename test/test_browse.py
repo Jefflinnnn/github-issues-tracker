@@ -141,7 +141,8 @@ def test_the_list_says_what_changed_and_marks_it(
     # Only the focused group shows its description.
     assert lines[0].text.startswith("1 ▾ FIX DIDN'T WORK (1)  a released fix")
     assert lines[1].text.startswith("● #1 ")
-    assert "fix-failed" in lines[1].text
+    # The group's title already names the status.
+    assert "fix-failed" not in lines[1].text
     assert lines[2].text == "2 ▸ BUGS TO FIX (1)"
     # Red only for urgent bugs; a failed fix is white.
     assert lines[0].kind == "bold" and lines[1].kind == "normal"
@@ -244,12 +245,11 @@ def test_rows_fit_80_columns_with_short_labels(browser: browse.Browser) -> None:
     assert all(len(line.text) <= 79 for line in lines)
     row = next(line.text for line in lines if "#1 " in line.text)
     assert row.startswith("● #1     urgent")
-    assert "failed" in row and "fix-failed" not in row
     # 100 columns and up get the full labels.
     wide = next(
         line.text for line in browser.body(120)[0] if "#1 " in line.text
     )
-    assert "bug: severe, urgent" in wide and "fix-failed" in wide
+    assert "bug: severe, urgent" in wide
 
 
 def test_space_and_b_page_through_the_card(browser: browse.Browser) -> None:

@@ -289,24 +289,24 @@ astral-sh/uv
   ───────────────────
   not yet tagged    6
 
-          TAGS                  ACTIVITY  IDLE
+          TAGS                  ACTIVITY  IDLE  STATUS          SUMMARY
 FIX DIDN'T WORK (1)  a released fix, still reported
-  #16726  bug: severe, urgent         39    9d  Managed Python is killed by Gatekeeper on macOS
+  #16726  bug: severe, urgent         39    9d                  Managed Python is killed by Gateke…
 
 BUGS TO FIX (2)  urgent first, then severe
-  #21428  bug: urgent                 12    3d  pip sync segfaults now and then on glibc
-  #22941  bug: severe                  4   11d  Install fails behind a corporate proxy
+  #21428  bug: urgent                 12    3d                  pip sync segfaults now and then on…
+  #22941  bug: severe                  4   11d                  Install fails behind a corporate p…
 
 MOST-WANTED FEATURES (1)  must-have, most demand first
-  #6830   must-have                   38   18d  Named lockfiles for several resol… [fix-in-progress]
+  #6830   must-have                   38   18d  fix-in-progress Named lockfiles for several resolu…
 
 READY TO CLOSE (3)  fix confirmed, duplicate, or no answer in 30 days
-  #5731   should-have                 14   81d  Cache size limit with automatic pru… [fix-confirmed]
-  #10219  could-have                  33   63d  JSON output for the tool list command [duplicate]
-  #12739  question                    34   54d  Why does a new venv see global package… [needs-info]
+  #5731   should-have                 14   81d  fix-confirmed   Cache size limit with automatic pr…
+  #10219  could-have                  33   63d  duplicate       JSON output for the tool list comm…
+  #12739  question                    34   54d  needs-info      Why does a new venv see global pac…
 
 ASK TO CONFIRM (1)  fix released, nobody has confirmed it
-  #5190   could-have                  35   45d  Lock build dependencies of sdists
+  #5190   could-have                  35   45d                  Lock build dependencies of sdists
 
 Run `triage browse` in the terminal to view every issue.
 This run tagged 9. Used $0.01 of $0.50 budget.
@@ -325,12 +325,14 @@ Read it top down:
   not tagged yet sit dimmed below the rule. Spam is counted here and listed
   nowhere.
 - **Since last run** appears from the second run on. Its heading counts
-  the issues opened, changed and closed since the previous run, and the
-  model writes one or two sentences on what matters most among them, such
-  as a fix that failed or a new urgent bug, naming issue numbers. The
-  digest is one extra small request; when the budget left can't cover it,
-  the section says so instead. The tag table also gets a change column,
-  and the open count shows its change:
+  the issues opened and closed since the previous run, and the older ones
+  with new comments from people (bots don't count), the same counts
+  `triage browse` shows. The model writes one or two sentences on what
+  matters most among them, such as a fix that failed or a new urgent bug,
+  naming issue numbers. The digest is one extra small request; when the
+  budget left can't cover it, the section says so instead. The open count
+  shows its change since the previous run, and when a tag's count changed,
+  the tag table gets a change column:
 
   ```text
   941 open (+3)
@@ -339,7 +341,7 @@ Read it top down:
     bug              15      +2   1 urgent · 2 severe
     feature          34      -1   2 must · 10 should · 22 could
 
-  SINCE LAST RUN (6 days ago)  4 new · 9 changed · 3 closed
+  SINCE LAST RUN (6 days ago)  4 new · 3 closed · 9 with new comments
     The volume fix for #2637 failed again, and #3802 is a new severe bug:
     Dynamic Island freezes after waking.
   ```
@@ -380,13 +382,15 @@ Two more groups are listed by `triage browse` only:
   newest issues are rarely stale.
 
 Each row shows the issue number, its tags in words, its activity
-(reactions plus comments), days since a person last commented, and the
-model's summary. `bug: severe, urgent` means high severity and high
-priority, and a plain `bug` means neither; `must-have ↑` means demand
-raised a feature's priority. An issue the model hasn't tagged yet shows
-its title. A row ends with its subtag, except in groups where every row
-has the same one. The reason for the tags is stored, not shown. Rows are
-cut to the terminal's width, at most 100 characters.
+(reactions plus comments), days since a person last commented, its
+status (subtag), and the model's summary. `bug: severe, urgent` means high
+severity and high priority, and a plain `bug` means neither; `must-have ↑`
+means demand raised a feature's priority. An issue the model hasn't tagged
+yet shows its title. The status is blank in groups whose title already
+names it. The reason for the tags is stored, not shown. Rows are cut to
+the terminal's width, at most 100 characters. Below 100 columns, rows use
+one-word labels (`urgent`, `severe`, `must`) and short status names
+(`fixing`, `needs info`), the same layout as `triage browse`.
 
 On a terminal, triage dims labels, marks urgent bugs and must-have
 features in red, and makes issue numbers
