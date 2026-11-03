@@ -35,7 +35,6 @@ _DONE = {
     prompt.Subtag.FIX_CONFIRMED,
     prompt.Subtag.DUPLICATE,
 }
-_WAITING = {prompt.Subtag.FIX_IN_PROGRESS, prompt.Subtag.NEEDS_INFO}
 # Groups whose rows all share one subtag.
 _ONE_SUBTAG = {"FIX DIDN'T WORK", "ASK TO CONFIRM"}
 # How an urgent bug that a subtag keeps out of "Bugs to fix first" is
@@ -115,26 +114,21 @@ class Style:
 PLAIN = Style()
 
 
-def summary(
-    result: run.RunResult,
-    width: int,
-    style: Style = PLAIN,
-    hot: bool = False,
-    stale: bool = False,
-) -> str:
+def summary(result: run.RunResult, width: int, style: Style = PLAIN) -> str:
     """Returns the Monday summary of a repository's open issues.
+
+    Hot and stale issues are counted, not listed; ``triage browse`` lists
+    them.
 
     Args:
         result: The run to summarize.
         width: Terminal width; rows are cut to fit, and to ``MAX_WIDTH``.
         style: How to style the text.
-        hot: List hot issues, not just count them.
-        stale: List stale issues, not just count them.
 
     Returns:
         The summary, ending with a newline.
     """
-    return Report(result, min(width, MAX_WIDTH), style, hot, stale).render()
+    return Report(result, min(width, MAX_WIDTH), style, False, False).render()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -650,35 +644,10 @@ class Report:
         return found.summary if found and found.summary else item.issue.title
 
     def _footer(self) -> list[str]:
-        """Backlog counts and the run's cost, one dim line each."""
+        """Where to see every issue, then what the run did and cost."""
         s = self.style
-        lines = []
-        backlog = []
-        if self.hot and not self.list_hot:
-            backlog.append((len(self.hot), "hot", "--hot", self.hot))
-        if self.stale and not self.list_stale:
-            backlog.append((len(self.stale), "stale", "--stale", self.stale))
-        if backlog:
-            counted = {
-                i.issue.id: i for _, _, _, items in backlog for i in items
-            }
-            untagged = sum(self.tagging(i) is None for i in counted.values())
-            text = " · ".join(
-                f"{count} {name}" for count, name, _, _ in backlog
-            )
-            if untagged:
-                text += f" ({untagged} untagged)"
-            flags = " / ".join(flag for _, _, flag, _ in backlog)
-            lines.append(f"{text} · {flags} to list")
-        waiting = sum(self.subtag(item) in _WAITING for item in self.listable)
-        notes = []
-        if waiting:
-            notes.append(f"{waiting} waiting on a fix or the reporter")
-        if any(item.issue.id in self.result.raised for item in self.listable):
-            notes.append("↑ raised to match demand")
-        if notes:
-            lines.append(" · ".join(notes))
-        lines.append(self._this_run())
+        lines = ["Run `triage browse` in the terminal to view every issue."]
+        lines += self._this_run()
         outcome = self.result.outcome
         if outcome.skipped:
             shown = outcome.skipped[:SKIPPED_SHOWN]
@@ -687,28 +656,24 @@ class Report:
             lines.append(
                 f"Unusable replies for {numbers}"
                 + (f" and {more} more" if more else "")
+                + "."
             )
         return [s.dim(line) for line in lines]
 
-    def _this_run(self) -> str:
+    def _this_run(self) -> list[str]:
         outcome = self.result.outcome
+        spent = _dollars(self.result.spent_usd)
         if self.result.budget_usd is None:
             started = self.result.ran_at
             when = f" ({_local(started)})" if started else ""
-            return (
-                f"Last run{when} tagged {outcome.tagged} · "
-                f"{_dollars(self.result.spent_usd)}"
-            )
-        parts = [
-            f"This run tagged {outcome.tagged}",
-            f"{_dollars(self.result.spent_usd)} of "
-            f"{_budget(self.result.budget_usd)}",
+            return [f"Last run{when} tagged {outcome.tagged}. Used {spent}."]
+        lines = [
+            f"This run tagged {outcome.tagged}. Used {spent} of "
+            f"{_budget(self.result.budget_usd)} budget."
         ]
         if outcome.left_for_budget:
-            parts.append(
-                f"{outcome.left_for_budget} queued for next run, hot first"
-            )
-        return " · ".join(parts)
+            lines.append(f"{outcome.left_for_budget} queued for next run.")
+        return lines
 
 
 def history(repos: Sequence[load.RepoHistory]) -> str:
