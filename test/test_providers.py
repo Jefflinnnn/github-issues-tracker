@@ -8,6 +8,7 @@ from conftest import issue
 
 from triage import config
 from triage.model import anthropic_api
+from triage.model import bedrock
 from triage.model import openai_compat
 from triage.model import prompt
 from triage.model import provider
@@ -15,6 +16,33 @@ from triage.model import providers
 from triage.pipeline import transform
 
 REQUEST = prompt.request(transform.to_issue(issue(1)))
+
+PRICED_MODELS = [
+    *(("anthropic", name, m) for name, m in anthropic_api.MODELS.items()),
+    *(("bedrock", name, m) for name, m in bedrock.MODELS.items()),
+    *(
+        ("openai", name, provider.Model(name, price))
+        for name, price in openai_compat.OPENAI_PRICES.items()
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("source", "name", "model"),
+    PRICED_MODELS,
+    ids=[f"{source}-{name}" for source, name, _ in PRICED_MODELS],
+)
+def test_every_model_setup_offers_has_a_price(
+    source: str, name: str, model: provider.Model
+) -> None:
+    """A model with no price won't run, so setup may not offer one."""
+    assert model.price is not None
+    assert model.price.input_per_million > 0
+    assert model.price.output_per_million > 0
+
+
+def test_the_anthropic_api_offers_haiku_5_5() -> None:
+    assert anthropic_api.MODELS["haiku"].id == "claude-haiku-5-5"
 
 
 @pytest.mark.parametrize(

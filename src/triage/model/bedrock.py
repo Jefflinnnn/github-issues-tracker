@@ -33,7 +33,8 @@ DEFAULT_REGION = "us-west-2"
 
 
 # Prices from https://aws.amazon.com/bedrock/pricing/ (Anthropic tab,
-# US West (Oregon)), checked 2026-10-31.
+# US West (Oregon)), checked 2026-10-31. Haiku stays on 4.5 here until
+# Bedrock offers 5.5; the Anthropic API's haiku is already 5.5.
 MODELS = {
     "haiku": provider.Model(
         "us.anthropic.claude-haiku-4-5-20251001-v1:0", pricing.Price(1.10, 5.50)
